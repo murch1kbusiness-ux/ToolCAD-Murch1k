@@ -1,0 +1,6 @@
+[ ] icons ok (icns/png present in app-source/icon)
+[ ] package config ok (app-source/package.json has build.mac section)
+[ ] build script ok (scripts/build-macos.sh)
+[ ] source snapshot ok (app-source contains package/src/icon)
+[ ] output path defined (release/mac-universal, release/*.dmg)
+[ ] mac target defined (dmg)

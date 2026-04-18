@@ -1,0 +1,8 @@
+ToolCAD - Professional CAD Drawing Tool
+Copyright © 2024 ToolCAD
+
+Ця програма надається "як є" без будь-яких гарантій.
+Всі права захищені.
+
+This software is provided for personal and commercial use.
+Redistribution without permission is prohibited.

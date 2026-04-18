@@ -1,0 +1,90 @@
+{
+    "generatedAtUtc":  "2026-04-18T22:07:04Z",
+    "sourcePackagePath":  "app-source/package.json",
+    "name":  "toolcad",
+    "productName":  "ToolCAD",
+    "version":  "1.0.0",
+    "main":  "dist/main/index.js",
+    "scripts":  {
+                    "start":  "tsc \u0026\u0026 electron .",
+                    "dev":  "tsc \u0026\u0026 electron . --dev",
+                    "build":  "tsc \u0026\u0026 cpy \"src/renderer/**\" \"dist/renderer/\"",
+                    "dist":  "npm run build \u0026\u0026 electron-builder",
+                    "dist:win":  "npm run build \u0026\u0026 electron-builder --win",
+                    "dist:portable":  "npm run build \u0026\u0026 electron-builder --win portable",
+                    "dist:mac":  "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build \u0026\u0026 electron-builder --mac --universal"
+                },
+    "build":  {
+                  "appId":  "com.toolcad.app",
+                  "productName":  "ToolCAD",
+                  "copyright":  "Copyright © 2024 ToolCAD",
+                  "directories":  {
+                                      "output":  "release"
+                                  },
+                  "files":  [
+                                "dist/**/*",
+                                "node_modules/**/*",
+                                "package.json"
+                            ],
+                  "extraResources":  [
+                                         {
+                                             "from":  "icon/",
+                                             "to":  "icon/",
+                                             "filter":  [
+                                                            "**/*"
+                                                        ]
+                                         }
+                                     ],
+                  "win":  {
+                              "target":  [
+                                             {
+                                                 "target":  "nsis",
+                                                 "arch":  [
+                                                              "x64"
+                                                          ]
+                                             },
+                                             {
+                                                 "target":  "portable",
+                                                 "arch":  [
+                                                              "x64"
+                                                          ]
+                                             }
+                                         ],
+                              "icon":  "icon/icon.ico",
+                              "requestedExecutionLevel":  "asInvoker"
+                          },
+                  "nsis":  {
+                               "oneClick":  false,
+                               "allowToChangeInstallationDirectory":  true,
+                               "allowElevation":  true,
+                               "installerIcon":  "icon/icon.ico",
+                               "uninstallerIcon":  "icon/icon.ico",
+                               "installerHeaderIcon":  "icon/icon.ico",
+                               "createDesktopShortcut":  true,
+                               "createStartMenuShortcut":  true,
+                               "shortcutName":  "ToolCAD",
+                               "installerLanguages":  [
+                                                          "uk_UA",
+                                                          "en_US"
+                                                      ],
+                               "language":  "1058",
+                               "license":  "LICENSE.txt",
+                               "installerSidebar":  "icon/installer-sidebar.bmp",
+                               "uninstallerSidebar":  "icon/installer-sidebar.bmp"
+                           },
+                  "portable":  {
+                                   "artifactName":  "ToolCAD-Portable-${version}.exe"
+                               },
+                  "mac":  {
+                              "target":  [
+                                             "dmg"
+                                         ],
+                              "icon":  "icon/icon.icns",
+                              "category":  "public.app-category.graphics-design",
+                              "minimumSystemVersion":  "11.0"
+                          },
+                  "dmg":  {
+                              "sign":  false
+                          }
+              }
+}

@@ -1,0 +1,22 @@
+# Effective electron-builder config snapshot for macOS target
+appId: com.toolcad.app
+productName: ToolCAD
+directories:
+  output: release
+files:
+  - dist/**/*
+  - node_modules/**/*
+  - package.json
+extraResources:
+  - from: icon/
+    to: icon/
+    filter:
+      - '**/*'
+mac:
+  target:
+    - dmg
+  icon: icon/icon.icns
+  category: public.app-category.graphics-design
+  minimumSystemVersion: '11.0'
+dmg:
+  sign: false
