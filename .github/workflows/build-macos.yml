@@ -17,11 +17,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
-
-      - name: Go to macOS prep source
-        run: cd Final/builds/macos-prep/app-source && pwd
+          cache-dependency-path: Final/builds/macos-prep/app-source/package-lock.json
 
       - name: Install dependencies
         working-directory: Final/builds/macos-prep/app-source
