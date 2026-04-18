@@ -9,6 +9,7 @@ jobs:
 
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Checkout
@@ -31,13 +32,21 @@ jobs:
 
       - name: Build unsigned macOS package
         working-directory: Final/builds/macos-prep/app-source
-        run: npx electron-builder --mac dmg zip
+        run: npx electron-builder --mac dmg zip --publish never
+
+      - name: Debug release output
+        run: |
+          echo "=== release folder ==="
+          ls -la Final/builds/macos-prep/app-source/release || true
+          echo "=== find dmg/zip/app ==="
+          find Final/builds/macos-prep/app-source/release -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.blockmap" \) || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos-build
           path: |
-            Final/builds/macos-prep/app-source/dist/*.dmg
-            Final/builds/macos-prep/app-source/dist/*.zip
-          if-no-files-found: warn
+            Final/builds/macos-prep/app-source/release/*.dmg
+            Final/builds/macos-prep/app-source/release/*.zip
+            Final/builds/macos-prep/app-source/release/*.blockmap
+          if-no-files-found: error
