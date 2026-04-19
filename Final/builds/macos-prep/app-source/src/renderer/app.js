@@ -1,22 +1,22 @@
-'use strict';
+﻿'use strict';
 
 // ═══════════════════════════════════════════════
 // PDF EXPORT — via Electron printToPDF
 // ═══════════════════════════════════════════════
 async function exportPDF() {
   if (!window.electronAPI?.exportPDF) {
-    alert('PDF export is only available in the Electron app');
+    alert('Експорт PDF доступний лише в Electron-застосунку');
     return;
   }
   try {
     const result = await window.electronAPI.exportPDF();
     if (result.success) {
-      showStatus('PDF eksportovano: ' + result.path);
+      showStatus('PDF експортовано: ' + result.path);
     } else {
-      alert('Pomylka eksportu PDF: ' + (result.error || 'Skasovano'));
+      alert('Помилка експорту PDF: ' + (result.error || 'Скасовано'));
     }
   } catch (err) {
-    alert('Pomylka eksportu PDF: ' + String(err));
+    alert('Помилка експорту PDF: ' + String(err));
   }
 }
 
@@ -32,6 +32,7 @@ const HIT_TOLERANCE = 3;
 const ARROW_STEP = 1;
 const ARROW_STEP_BIG = 10;
 const SNAP_RADIUS_PX = 12;
+const ANGLE_SNAP_STEP_DEG = 15;
 
 // Rulers
 const RULER_BG   = '#2d2d2d';
@@ -627,7 +628,7 @@ function formatMM(value) {
 const AUTO_ANNOTATE = {
   enabled:       true,   // вмикати авто-розмітку
   offsetDefault: 8,      // відступ розмірної лінії від об'єкта (мм)
-  showDialog:    true,   // показувати діалог вибору
+  showDialog:    false,  // для простого режиму: одразу ставимо базовий розмір без діалогу
 };
 
 // ═══════════════════════════════════════════════
@@ -656,12 +657,17 @@ const state = {
   isDragging: false,
   dragStartW: null,
   lastDragW: null,
+  dragAxisLock: null, // 'x' | 'y' while Shift-dragging
   dragEntitySnap: null,
+  dragRigidMove: false,
   isDraggingEndpoint: false,
   dragEndpointEntId: null,
   dragEndpointIdx: null,
   dragEndpointOrigX: null,
   dragEndpointOrigY: null,
+  dragEndpointRotate: false,
+  isDraggingArcCtrl: false,
+  dragArcCtrlEntId: null,
   isDraggingDimOffset: false,
   dragDimId: null,
   hoveredId: null,
@@ -690,7 +696,13 @@ const state = {
 
   // Clipboard for copy/paste
   clipboard: null,
+  pointerWorld: null,
+  duplicatePlacement: null, // interactive duplicate-move mode
   imagesLocked: false,
+  quickEditorMode: false,
+  quickEditorPendingRefresh: false,
+  quickEditorDirection: {},
+  suspendSnapshot: false,
 
   // ═══ GOST: Page format and stamp ═══
   pageFormat:      'A4',       // поточний формат
@@ -763,6 +775,7 @@ const btnZoomFit   = document.getElementById('btn-zoomfit');
 const btnClear     = document.getElementById('btn-clear');
 const btnMirrorX   = document.getElementById('btn-mirror-x');
 const btnMirrorY   = document.getElementById('btn-mirror-y');
+const btnQuickEditor = document.getElementById('btn-quick-editor');
 
 // GOST: Page format, orientation, stamp, hatch, centerline
 const selPageFormat    = document.getElementById('sel-page-format');
@@ -785,6 +798,31 @@ const coordBox   = document.getElementById('coord-input-box');
 const coordLabel = document.getElementById('coord-input-label');
 const coordField = document.getElementById('coord-input-field');
 
+const quickEditorPanel   = document.getElementById('quick-editor-panel');
+const quickEditorList    = document.getElementById('qe-list');
+const quickEditorClose   = document.getElementById('qe-close');
+const quickEditorSave    = document.getElementById('qe-save');
+const quickEditorSaveCopy= document.getElementById('qe-save-copy');
+const quickEditorOpen    = document.getElementById('qe-open');
+const quickEditorFix     = document.getElementById('qe-fix');
+
+function isEventInsideQuickEditor(target) {
+  return !!(quickEditorPanel && target instanceof Element && quickEditorPanel.contains(target));
+}
+
+if (quickEditorPanel) {
+  quickEditorPanel.addEventListener('wheel', (e) => {
+    // Keep wheel scrolling inside quick editor and do not bubble to canvas zoom.
+    e.stopPropagation();
+  }, { passive: true });
+}
+if (quickEditorList) {
+  quickEditorList.addEventListener('wheel', (e) => {
+    // Ensure list scrolling is not intercepted by viewport zoom handlers.
+    e.stopPropagation();
+  }, { passive: true });
+}
+
 localStorage.removeItem('chisel_templates');
 
 coordField.addEventListener('keydown', (e) => {
@@ -801,6 +839,53 @@ coordField.addEventListener('keydown', (e) => {
     previewLayer.innerHTML = '';
   }
 });
+
+// ═══════════════════════════════════════════════
+// CAD INTEGRATION: Phase 1-4 complete migration
+// ═══════════════════════════════════════════════
+let integration = null;
+let cadModel, cadTopology, cadViewport, cadInteraction, cadOverlay, cadSvgRenderer, cadOverlayRenderer;
+
+try {
+  const overlayLayer = document.getElementById('overlay-layer') || previewLayer;
+
+  // Phase 1: Model + Renderers
+  integration = CADIntegration.initPhase1(state, drawingSvg, entitiesLayer, overlayLayer);
+  console.log('[APP] Phase 1: Model + Renderers');
+
+  // Phase 2: Interaction Engine
+  CADIntegration.initPhase2(drawingSvg);
+  console.log('[APP] Phase 2: Interaction Engine');
+
+  // Phase 3: Pipeline + Topology
+  CADIntegration.initPhase3();
+  console.log('[APP] Phase 3: Pipeline + Topology');
+
+  // Phase 4: Complete Migration
+  CADIntegration.initPhase4();
+  console.log('[APP] Phase 4: Complete Migration - ALL LEGACY DISABLED');
+
+  // Публікуємо модулі для сумісності
+  cadModel = integration.model;
+  cadViewport = integration.viewport;
+  cadTopology = integration.pipeline.topology;
+  cadInteraction = integration.pipeline.interaction;
+  cadOverlay = integration.overlayModel;
+  cadSvgRenderer = integration.svgRenderer;
+  cadOverlayRenderer = integration.overlayRenderer;
+
+  // Синхронізуємо viewport зі старим станом
+  window.cadViewport = cadViewport;
+  if (!window.CADIntegration) window.CADIntegration = {};
+  const vp = getCadViewport();
+  if (vp) {
+    vp.setZoom(state.zoom);
+    vp.setPan(state.panX, state.panY);
+  }
+} catch (err) {
+  console.error('[APP] Integration failed:', err);
+  console.error('[APP] Перехід на legacy-код');
+}
 
 // ═══════════════════════════════════════════════
 // SVG HELPERS
@@ -836,8 +921,8 @@ function calcArcFromThreePoints(p1, ctrl, p2) {
     (p2.y - p1.y) * ctrl.x - (p2.x - p1.x) * ctrl.y + p2.x * p1.y - p2.y * p1.x
   ) / chordLen;
 
-  // If sagitta < 1mm — render as straight line
-  const MIN_SAGITTA = 1.0;
+  // Keep tiny arcs usable for fine manual input (small features).
+  const MIN_SAGITTA = 0.02;
   if (sagitta < MIN_SAGITTA) {
     return { isLine: true, r: Infinity, cx: 0, cy: 0, startAngle: 0, endAngle: 0, sweepFlag: 1 };
   }
@@ -966,7 +1051,8 @@ function makeArcSVGPath(ent, stroke, width, dash) {
   el.setAttribute('stroke-width', width);
   el.setAttribute('fill', 'none');
   if (dash) el.setAttribute('stroke-dasharray', dash);
-  el.setAttribute('stroke-linecap', 'butt');
+  // Square caps hide tiny antialias seams at arc/line junctions.
+  el.setAttribute('stroke-linecap', 'square');
   el.setAttribute('stroke-linejoin', 'miter');
   el.setAttribute('stroke-miterlimit', '10');
   el.setAttribute('vector-effect', 'non-scaling-stroke');
@@ -1004,6 +1090,36 @@ function isAngleInArc(angle, startA, endA, sweepFlag) {
   }
 }
 
+function closestPointOnArc(ent, wx, wy) {
+  if (!ent || ent.type !== 'arc' || ent.isLine || !isFinite(ent.r) || ent.r <= 0 || ent.cx === undefined) {
+    return { x: wx, y: wy };
+  }
+
+  const dx = wx - ent.cx;
+  const dy = wy - ent.cy;
+  const angle = Math.atan2(dy, dx);
+
+  const startAngle = (ent.startAngle || 0) * Math.PI / 180;
+  const endAngle = (ent.endAngle || 0) * Math.PI / 180;
+  const crossWorld = (ent.x2 - ent.x1) * (ent.ctrl?.y - ent.y1) - (ent.y2 - ent.y1) * (ent.ctrl?.x - ent.x1);
+  const sweepFlag = crossWorld > 0 ? 0 : 1;
+
+  if (isAngleInArc(angle, startAngle, endAngle, sweepFlag)) {
+    return {
+      x: ent.cx + ent.r * Math.cos(angle),
+      y: ent.cy + ent.r * Math.sin(angle),
+    };
+  }
+
+  const startX = ent.cx + ent.r * Math.cos(startAngle);
+  const startY = ent.cy + ent.r * Math.sin(startAngle);
+  const endX = ent.cx + ent.r * Math.cos(endAngle);
+  const endY = ent.cy + ent.r * Math.sin(endAngle);
+  const d1 = Math.hypot(wx - startX, wy - startY);
+  const d2 = Math.hypot(wx - endX, wy - endY);
+  return d1 <= d2 ? { x: startX, y: startY } : { x: endX, y: endY };
+}
+
 function hitTest(ent, wx, wy) {
   const tol = HIT_TOLERANCE / effectiveZoom();
   if (ent.type === 'line' || ent.type === 'centerline') {
@@ -1033,14 +1149,22 @@ function hitTest(ent, wx, wy) {
   }
   if (ent.type === 'arc') {
     if (ent.isLine || !isFinite(ent.r)) {
-      return distToSegment(wx, wy, ent.x1, ent.y1, ent.x2, ent.y2) < tol;
+      return distToSegment(wx, wy, ent.x1, ent.y1, ent.x2, ent.y2) < tol * 1.8;
     }
 
     const dx   = wx - ent.cx;
     const dy   = wy - ent.cy;
     const dist = Math.sqrt(dx * dx + dy * dy);
+    const arcTol = Math.max(tol * 2.8, 0.8);
 
-    if (Math.abs(dist - ent.r) > tol * 2) return false;
+    if (Math.abs(dist - ent.r) > arcTol) {
+      // Small-radius/small-chord arcs are hard to click by ring distance alone.
+      const chordLen = Math.hypot(ent.x2 - ent.x1, ent.y2 - ent.y1);
+      if (chordLen < 8) {
+        return distToSegment(wx, wy, ent.x1, ent.y1, ent.x2, ent.y2) < arcTol * 1.2;
+      }
+      return false;
+    }
 
     // Check if point angle is within arc sweep
     if (!ent.ctrl) return true;
@@ -1053,7 +1177,12 @@ function hitTest(ent, wx, wy) {
     const startAngle = Math.atan2(ent.y1 - ent.cy, ent.x1 - ent.cx);
     const endAngle   = Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
 
-    return isAngleInArc(hitAngle, startAngle, endAngle, sweepFlag);
+    if (isAngleInArc(hitAngle, startAngle, endAngle, sweepFlag)) return true;
+
+    // Allow grabbing close to arc endpoints; this helps manual radius editing.
+    if (Math.hypot(wx - ent.x1, wy - ent.y1) < arcTol) return true;
+    if (Math.hypot(wx - ent.x2, wy - ent.y2) < arcTol) return true;
+    return false;
   }
   if (ent.type === 'dimension') {
     return hitTestDimension(ent, wx, wy);
@@ -1068,6 +1197,121 @@ function hitTest(ent, wx, wy) {
     return distToSegment(wx, wy, ent.x1, ent.y1, ent.x2, ent.y2) < tol;
   }
   return false;
+}
+
+function getHitToleranceForEntity(ent) {
+  const tol = HIT_TOLERANCE / effectiveZoom();
+  if (!ent) return tol;
+  if (ent.type === 'arc') return Math.max(tol * 3.2, 1.2);
+  if (ent.type === 'dimension') return tol * 2.2;
+  if (ent.type === 'image') return tol;
+  return tol;
+}
+
+function entityHitDistance(ent, wx, wy) {
+  if (!ent) return Infinity;
+
+  if (ent.type === 'line' || ent.type === 'centerline') {
+    return distToSegment(wx, wy, ent.x1, ent.y1, ent.x2, ent.y2);
+  }
+
+  if (ent.type === 'rect') {
+    const x1 = Math.min(ent.x1, ent.x2), x2 = Math.max(ent.x1, ent.x2);
+    const y1 = Math.min(ent.y1, ent.y2), y2 = Math.max(ent.y1, ent.y2);
+    return Math.min(
+      distToSegment(wx, wy, x1, y1, x2, y1),
+      distToSegment(wx, wy, x2, y1, x2, y2),
+      distToSegment(wx, wy, x2, y2, x1, y2),
+      distToSegment(wx, wy, x1, y2, x1, y1),
+    );
+  }
+
+  if (ent.type === 'circle') {
+    return Math.abs(Math.hypot(wx - ent.cx, wy - ent.cy) - ent.r);
+  }
+
+  if (ent.type === 'polyline') {
+    let best = Infinity;
+    for (let i = 0; i < ent.points.length - 1; i++) {
+      const d = distToSegment(
+        wx, wy,
+        ent.points[i].x, ent.points[i].y,
+        ent.points[i + 1].x, ent.points[i + 1].y,
+      );
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  if (ent.type === 'arc') {
+    if (ent.isLine || !isFinite(ent.r)) {
+      return distToSegment(wx, wy, ent.x1, ent.y1, ent.x2, ent.y2);
+    }
+    const closest = closestPointOnArc(ent, wx, wy);
+    const dArc = Math.hypot(wx - closest.x, wy - closest.y);
+    const dStart = Math.hypot(wx - ent.x1, wy - ent.y1);
+    const dEnd = Math.hypot(wx - ent.x2, wy - ent.y2);
+    return Math.min(dArc, dStart, dEnd);
+  }
+
+  if (ent.type === 'dimension') {
+    if (!hitTestDimension(ent, wx, wy)) return Infinity;
+    const dx = ent.x2 - ent.x1;
+    const dy = ent.y2 - ent.y1;
+    const entLen = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ux = dx / entLen;
+    const uy = dy / entLen;
+    const nx = -uy;
+    const ny = ux;
+    let d1w;
+    let d2w;
+    if (ent.dimType === 'aligned') {
+      d1w = { x: ent.x1 + nx * ent.offset, y: ent.y1 + ny * ent.offset };
+      d2w = { x: ent.x2 + nx * ent.offset, y: ent.y2 + ny * ent.offset };
+    } else {
+      const isHoriz = Math.abs(dx) >= Math.abs(dy);
+      if (isHoriz) {
+        d1w = { x: ent.x1, y: ent.y1 + ent.offset };
+        d2w = { x: ent.x2, y: ent.y1 + ent.offset };
+      } else {
+        d1w = { x: ent.x1 + ent.offset, y: ent.y1 };
+        d2w = { x: ent.x1 + ent.offset, y: ent.y2 };
+      }
+    }
+    return distPointToSegment(wx, wy, d1w.x, d1w.y, d2w.x, d2w.y);
+  }
+
+  if (ent.type === 'image') {
+    if (ent.locked) return Infinity;
+    const inside = wx >= ent.x && wx <= ent.x + (ent.w || 0) &&
+                   wy >= ent.y && wy <= ent.y + (ent.h || 0);
+    return inside ? 0 : Infinity;
+  }
+
+  return Infinity;
+}
+
+function pickEntityAt(wx, wy) {
+  let picked = null;
+  let bestScore = Infinity;
+  const zWeight = 0.0001;
+
+  for (let i = state.entities.length - 1; i >= 0; i--) {
+    const ent = state.entities[i];
+    const dist = entityHitDistance(ent, wx, wy);
+    if (!isFinite(dist)) continue;
+    const tol = getHitToleranceForEntity(ent);
+    if (dist > tol) continue;
+
+    const zBias = (state.entities.length - 1 - i) * zWeight;
+    const score = dist + zBias;
+    if (score < bestScore) {
+      bestScore = score;
+      picked = ent;
+    }
+  }
+
+  return picked;
 }
 
 // Хелпер: відстань від точки до відрізка
@@ -1109,6 +1353,27 @@ function hitTestDimension(ent, wx, wy) {
   return distPointToSegment(wx, wy, d1w.x, d1w.y, d2w.x, d2w.y) < tol;
 }
 
+function findDimensionForEditAt(wx, wy) {
+  const expandedTol = Math.max(HIT_TOLERANCE / effectiveZoom() * 3.2, 1.8);
+
+  for (let i = state.entities.length - 1; i >= 0; i--) {
+    const ent = state.entities[i];
+    if (ent.type !== 'dimension') continue;
+
+    if (hitTestDimension(ent, wx, wy)) return ent;
+
+    const dist = entityHitDistance(ent, wx, wy);
+    if (isFinite(dist) && dist <= expandedTol) return ent;
+
+    // Tiny dimensions are easier to catch near their text midpoint.
+    const midX = (ent.x1 + ent.x2) / 2;
+    const midY = (ent.y1 + ent.y2) / 2;
+    if (Math.hypot(wx - midX, wy - midY) <= expandedTol * 1.3) return ent;
+  }
+
+  return null;
+}
+
 function moveEntity(ent, dx, dy) {
   if (ent.type === 'line' || ent.type === 'rect') {
     ent.x1 += dx; ent.y1 += dy; ent.x2 += dx; ent.y2 += dy;
@@ -1128,6 +1393,127 @@ function moveEntity(ent, dx, dy) {
   }
 }
 
+function rotatePointAround(px, py, ox, oy, angle) {
+  const dx = px - ox;
+  const dy = py - oy;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return {
+    x: ox + dx * c - dy * s,
+    y: oy + dx * s + dy * c,
+  };
+}
+
+function rotateEntityByEndpointDrag(ent, movedIdx, targetX, targetY) {
+  if (!ent || (ent.type !== 'line' && ent.type !== 'centerline' && ent.type !== 'arc')) return false;
+  if (movedIdx !== 0 && movedIdx !== 1) return false;
+
+  const anchorIdx = movedIdx === 0 ? 1 : 0;
+  const anchor = anchorIdx === 0
+    ? { x: ent.x1, y: ent.y1 }
+    : { x: ent.x2, y: ent.y2 };
+  const moved = movedIdx === 0
+    ? { x: ent.x1, y: ent.y1 }
+    : { x: ent.x2, y: ent.y2 };
+
+  const oldVecX = moved.x - anchor.x;
+  const oldVecY = moved.y - anchor.y;
+  const oldLen = Math.hypot(oldVecX, oldVecY);
+  if (oldLen < 1e-9) return false;
+
+  const rawVecX = targetX - anchor.x;
+  const rawVecY = targetY - anchor.y;
+  const rawLen = Math.hypot(rawVecX, rawVecY);
+  if (rawLen < 1e-9) return false;
+
+  const newVecX = (rawVecX / rawLen) * oldLen;
+  const newVecY = (rawVecY / rawLen) * oldLen;
+  const newAngle = Math.atan2(newVecY, newVecX);
+  const oldAngle = Math.atan2(oldVecY, oldVecX);
+  const delta = newAngle - oldAngle;
+
+  const newMoved = { x: anchor.x + newVecX, y: anchor.y + newVecY };
+  if (movedIdx === 0) {
+    ent.x1 = newMoved.x;
+    ent.y1 = newMoved.y;
+  } else {
+    ent.x2 = newMoved.x;
+    ent.y2 = newMoved.y;
+  }
+
+  if (ent.type === 'arc') {
+    if (isFinite(ent.cx) && isFinite(ent.cy)) {
+      const nc = rotatePointAround(ent.cx, ent.cy, anchor.x, anchor.y, delta);
+      ent.cx = nc.x;
+      ent.cy = nc.y;
+    }
+    if (ent.ctrl) {
+      const nctrl = rotatePointAround(ent.ctrl.x, ent.ctrl.y, anchor.x, anchor.y, delta);
+      ent.ctrl = { x: nctrl.x, y: nctrl.y };
+    }
+    refreshArcGeometry(ent);
+  }
+
+  return true;
+}
+
+function pointOnArcLikeEntity(ent, px, py, tol) {
+  if (!ent || ent.type !== 'arc') return false;
+  if (ent.isLine || !isFinite(ent.r) || ent.r <= 0 || ent.cx === undefined) {
+    return distToSegment(px, py, ent.x1, ent.y1, ent.x2, ent.y2) < tol;
+  }
+
+  const closest = closestPointOnArc(ent, px, py);
+  return Math.hypot(closest.x - px, closest.y - py) < tol;
+}
+
+function closestPointOnSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-10) return { x: ax, y: ay };
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  return { x: ax + t * dx, y: ay + t * dy };
+}
+
+function closestPointOnEntityBody(ent, px, py) {
+  if (!ent) return null;
+  if (ent.type === 'arc') {
+    return closestPointOnArc(ent, px, py);
+  }
+  if (ent.type === 'line' || ent.type === 'centerline') {
+    return closestPointOnSegment(px, py, ent.x1, ent.y1, ent.x2, ent.y2);
+  }
+  return null;
+}
+
+function getEntitySpanAfterEndpointMove(ent, endpointKey, x, y) {
+  if (!ent) return 0;
+  const nx1 = endpointKey === 'start' ? x : ent.x1;
+  const ny1 = endpointKey === 'start' ? y : ent.y1;
+  const nx2 = endpointKey === 'end' ? x : ent.x2;
+  const ny2 = endpointKey === 'end' ? y : ent.y2;
+  return Math.hypot(nx2 - nx1, ny2 - ny1);
+}
+
+function setEntityEndpointSafe(ent, endpointKey, x, y, minSpan = 0.2) {
+  if (!ent || (endpointKey !== 'start' && endpointKey !== 'end')) return false;
+  if (getEntitySpanAfterEndpointMove(ent, endpointKey, x, y) < minSpan) return false;
+
+  if (endpointKey === 'start') {
+    ent.x1 = x;
+    ent.y1 = y;
+  } else {
+    ent.x2 = x;
+    ent.y2 = y;
+  }
+
+  if (ent.type === 'arc' && ent.ctrl) {
+    refreshArcGeometry(ent);
+  }
+  return true;
+}
+
 function isEndpointConnected(entId, px, py) {
   const TOL = 0.5;
   for (const other of state.entities) {
@@ -1135,6 +1521,13 @@ function isEndpointConnected(entId, px, py) {
     if (other.type !== 'line' && other.type !== 'centerline' && other.type !== 'arc') continue;
     if (Math.hypot(other.x1 - px, other.y1 - py) < TOL) return true;
     if (Math.hypot(other.x2 - px, other.y2 - py) < TOL) return true;
+    if ((other.type === 'line' || other.type === 'centerline') &&
+        distToSegment(px, py, other.x1, other.y1, other.x2, other.y2) < TOL) {
+      return true;
+    }
+    if (other.type === 'arc' && pointOnArcLikeEntity(other, px, py, TOL)) {
+      return true;
+    }
   }
   return false;
 }
@@ -1159,13 +1552,13 @@ function buildLineConnectionsLegacy(lineId, x1, y1, x2, y2) {
     if (Math.hypot(otherX1 - x1, otherY1 - y1) < TOL) {
       conns.push({ lineId, endpoint: 'start', targetId: other.id });
       // Reverse connection: other entity also connects to this line
-      if (other.type === 'line' || other.type === 'centerline') {
+      if (other.type === 'line' || other.type === 'centerline' || other.type === 'arc') {
         conns.push({ lineId: other.id, endpoint: 'start', targetId: lineId });
       }
     }
     if (Math.hypot(otherX2 - x1, otherY2 - y1) < TOL) {
       conns.push({ lineId, endpoint: 'start', targetId: other.id });
-      if (other.type === 'line' || other.type === 'centerline') {
+      if (other.type === 'line' || other.type === 'centerline' || other.type === 'arc') {
         conns.push({ lineId: other.id, endpoint: 'end', targetId: lineId });
       }
     }
@@ -1190,6 +1583,19 @@ function buildLineConnections(lineId, x1, y1, x2, y2) {
   const TOL = 0.5; // only tight endpoint-to-endpoint matches should create connections
   const conns = [];
 
+  const sourcePoints = [
+    { key: 'start', x: x1, y: y1 },
+    { key: 'end', x: x2, y: y2 },
+  ];
+
+  function getOtherPoints(other) {
+    const pts = [
+      { key: 'start', x: other.x1, y: other.y1 },
+      { key: 'end', y: other.y2, x: other.x2 },
+    ];
+    return pts;
+  }
+
   for (const other of state.entities) {
     if (other.id === lineId) continue;
     if (other.type !== 'line' && other.type !== 'centerline' && other.type !== 'arc' && other.type !== 'rect') continue;
@@ -1201,22 +1607,15 @@ function buildLineConnections(lineId, x1, y1, x2, y2) {
 
     if (otherX1 === null || otherY1 === null) continue;
 
-    const s1o1 = Math.hypot(x1 - otherX1, y1 - otherY1) < TOL;
-    const s1o2 = otherX2 !== null && otherY2 !== null && Math.hypot(x1 - otherX2, y1 - otherY2) < TOL;
-    const s2o1 = Math.hypot(x2 - otherX1, y2 - otherY1) < TOL;
-    const s2o2 = otherX2 !== null && otherY2 !== null && Math.hypot(x2 - otherX2, y2 - otherY2) < TOL;
-
-    if (s1o1 || s1o2) {
-      conns.push({ lineId, endpoint: 'start', targetId: other.id });
-      if (other.type === 'line' || other.type === 'centerline') {
-        conns.push({ lineId: other.id, endpoint: s1o1 ? 'start' : 'end', targetId: lineId });
-      }
-    }
-
-    if (s2o1 || s2o2) {
-      conns.push({ lineId, endpoint: 'end', targetId: other.id });
-      if (other.type === 'line' || other.type === 'centerline') {
-        conns.push({ lineId: other.id, endpoint: s2o1 ? 'start' : 'end', targetId: lineId });
+    for (const src of sourcePoints) {
+      const otherPoints = getOtherPoints(other);
+      for (const dst of otherPoints) {
+        if (dst.x == null || dst.y == null) continue;
+        if (Math.hypot(src.x - dst.x, src.y - dst.y) >= TOL) continue;
+        conns.push({ lineId, endpoint: src.key, targetId: other.id, targetPoint: dst.key });
+        if (other.type === 'line' || other.type === 'centerline' || other.type === 'arc') {
+          conns.push({ lineId: other.id, endpoint: dst.key, targetId: lineId, targetPoint: src.key });
+        }
       }
     }
   }
@@ -1230,11 +1629,15 @@ function rebuildLineConnections(lineIds) {
   lineIds.forEach(id => {
     const ent = state.entities.find(e => e.id === id);
     if (!ent) return;
-    if (ent.type !== 'line' && ent.type !== 'centerline') return;
+    if (ent.type !== 'line' && ent.type !== 'centerline' && ent.type !== 'arc') return;
     ids.add(id);
   });
 
   if (ids.size === 0) return;
+
+  const preservedBodyConns = state.connections.filter(
+    c => (ids.has(c.lineId) || ids.has(c.targetId)) && c.endpoint === 'body'
+  ).map(c => ({ ...c }));
 
   state.connections = state.connections.filter(
     c => !ids.has(c.lineId) && !ids.has(c.targetId)
@@ -1244,6 +1647,97 @@ function rebuildLineConnections(lineIds) {
     const ent = state.entities.find(e => e.id === id);
     if (!ent) return;
     state.connections.push(...buildLineConnections(ent.id, ent.x1, ent.y1, ent.x2, ent.y2));
+  });
+
+  preservedBodyConns.forEach(conn => {
+    const line = state.entities.find(e => e.id === conn.lineId);
+    const target = state.entities.find(e => e.id === conn.targetId);
+    if (!line || !target) return;
+    if (state.connections.some(c =>
+      c.lineId === conn.lineId &&
+      c.endpoint === conn.endpoint &&
+      c.targetId === conn.targetId &&
+      c.targetPoint === conn.targetPoint
+    )) {
+      return;
+    }
+    state.connections.push(conn);
+  });
+}
+
+function enforceConnectionConstraints(onlyIds) {
+  const idsFilter = onlyIds && onlyIds.size ? onlyIds : null;
+
+  const translateEntityToPoint = (ent, targetPointKey, sourcePt) => {
+    if (!ent || !sourcePt) return;
+    if (targetPointKey === 'start') {
+      if (ent.type === 'arc') {
+        if (!setArcEndpointKeepRadius(ent, 'start', sourcePt.x, sourcePt.y)) return;
+      } else {
+        ent.x1 = sourcePt.x;
+        ent.y1 = sourcePt.y;
+      }
+      return;
+    }
+    if (targetPointKey === 'end') {
+      if (ent.type === 'arc') {
+        if (!setArcEndpointKeepRadius(ent, 'end', sourcePt.x, sourcePt.y)) return;
+      } else {
+        ent.x2 = sourcePt.x;
+        ent.y2 = sourcePt.y;
+      }
+      return;
+    }
+    if (targetPointKey === 'mid') {
+      const midX = (ent.x1 + ent.x2) / 2;
+      const midY = (ent.y1 + ent.y2) / 2;
+      const dx = sourcePt.x - midX;
+      const dy = sourcePt.y - midY;
+      if (ent.type === 'arc') {
+        ent.x1 += dx; ent.y1 += dy;
+        ent.x2 += dx; ent.y2 += dy;
+        ent.cx += dx; ent.cy += dy;
+        if (ent.ctrl) { ent.ctrl.x += dx; ent.ctrl.y += dy; }
+        refreshArcGeometry(ent);
+      } else {
+        ent.x1 += dx; ent.y1 += dy;
+        ent.x2 += dx; ent.y2 += dy;
+      }
+    }
+  };
+
+  state.connections.forEach(conn => {
+    if (idsFilter && !idsFilter.has(conn.lineId) && !idsFilter.has(conn.targetId)) return;
+
+    const source = state.entities.find(e => e.id === conn.lineId);
+    const target = state.entities.find(e => e.id === conn.targetId);
+    if (!source || !target) return;
+
+    const targetPointKey = conn.targetPoint || conn.endpoint;
+    if (targetPointKey === 'body') return;
+
+    if (conn.endpoint === 'body') {
+      const refPoint = conn.jointX != null && conn.jointY != null
+        ? { x: conn.jointX, y: conn.jointY }
+        : targetPointKey === 'start'
+          ? { x: target.x1, y: target.y1 }
+          : targetPointKey === 'end'
+            ? { x: target.x2, y: target.y2 }
+            : { x: (target.x1 + target.x2) / 2, y: (target.y1 + target.y2) / 2 };
+      const sourceJoint = closestPointOnEntityBody(source, refPoint.x, refPoint.y) || refPoint;
+      conn.jointX = sourceJoint.x;
+      conn.jointY = sourceJoint.y;
+      translateEntityToPoint(target, targetPointKey, sourceJoint);
+      return;
+    }
+
+    let sourcePoint = null;
+    if (conn.endpoint === 'start') sourcePoint = { x: source.x1, y: source.y1 };
+    else if (conn.endpoint === 'end') sourcePoint = { x: source.x2, y: source.y2 };
+    else if (conn.endpoint === 'mid') sourcePoint = { x: (source.x1 + source.x2) / 2, y: (source.y1 + source.y2) / 2 };
+    if (!sourcePoint) return;
+
+    translateEntityToPoint(target, targetPointKey, sourcePoint);
   });
 }
 
@@ -1256,13 +1750,167 @@ function moveConnectedEndpoints(movedEntId, dx, dy) {
     const target = state.entities.find(e => e.id === conn.targetId);
     if (!line || !target) return false;
 
+    if (conn.lineId === movedEntId) {
+      const sourcePointKey = conn.endpoint;
+      const targetPointKey = conn.targetPoint || conn.endpoint;
+      const jointX = conn.jointX != null ? conn.jointX + dx : null;
+      const jointY = conn.jointY != null ? conn.jointY + dy : null;
+
+      if (targetPointKey === 'mid') {
+        const targetMid = { x: (target.x1 + target.x2) / 2, y: (target.y1 + target.y2) / 2 };
+        const sourcePoint = sourcePointKey === 'body'
+          ? { x: jointX ?? targetMid.x, y: jointY ?? targetMid.y }
+          : sourcePointKey === 'mid'
+            ? { x: (line.x1 + line.x2) / 2, y: (line.y1 + line.y2) / 2 }
+            : sourcePointKey === 'end'
+              ? { x: line.x2, y: line.y2 }
+              : { x: line.x1, y: line.y1 };
+        const mdx = sourcePoint.x - targetMid.x;
+        const mdy = sourcePoint.y - targetMid.y;
+        if (target.type === 'arc') {
+          target.x1 += mdx; target.y1 += mdy;
+          target.x2 += mdx; target.y2 += mdy;
+          target.cx += mdx; target.cy += mdy;
+          if (target.ctrl) { target.ctrl.x += mdx; target.ctrl.y += mdy; }
+          refreshArcGeometry(target);
+        } else {
+          target.x1 += mdx; target.y1 += mdy;
+          target.x2 += mdx; target.y2 += mdy;
+        }
+        return true;
+      }
+
+      const newPoint = sourcePointKey === 'body'
+        ? { x: jointX ?? line.x1, y: jointY ?? line.y1 }
+        : sourcePointKey === 'end'
+          ? { x: line.x2, y: line.y2 }
+          : { x: line.x1, y: line.y1 };
+
+      if (targetPointKey === 'start') {
+        if (target.type === 'arc') {
+          if (!setArcEndpointKeepRadius(target, 'start', newPoint.x, newPoint.y)) return false;
+        } else {
+          target.x1 = newPoint.x;
+          target.y1 = newPoint.y;
+        }
+      } else if (targetPointKey === 'end') {
+        if (target.type === 'arc') {
+          if (!setArcEndpointKeepRadius(target, 'end', newPoint.x, newPoint.y)) return false;
+        } else {
+          target.x2 = newPoint.x;
+          target.y2 = newPoint.y;
+        }
+      }
+      if (sourcePointKey === 'body') {
+        conn.jointX = newPoint.x;
+        conn.jointY = newPoint.y;
+      }
+      return true;
+    }
+
     if (conn.targetId === movedEntId) {
-      // Move the line endpoint along with the target entity
-      if (conn.endpoint === 'start') { line.x1 += dx; line.y1 += dy; }
-      else { line.x2 += dx; line.y2 += dy; }
+      return true;
     }
     return true;
   });
+}
+
+function moveRigidConnectedComponent(rootEntId, dx, dy) {
+  if (dx === 0 && dy === 0) return new Set();
+
+  const movedIds = new Set();
+  const queue = [rootEntId];
+
+  while (queue.length > 0) {
+    const entId = queue.shift();
+    if (movedIds.has(entId)) continue;
+
+    const ent = state.entities.find(e => e.id === entId);
+    if (!ent) continue;
+
+    movedIds.add(entId);
+    moveEntity(ent, dx, dy);
+    updateLinkedDimensions(ent, dx, dy);
+
+    state.connections.forEach(conn => {
+      if (conn.lineId === entId && conn.targetId != null && !movedIds.has(conn.targetId)) {
+        queue.push(conn.targetId);
+      }
+      if (conn.targetId === entId && conn.lineId != null && !movedIds.has(conn.lineId)) {
+        queue.push(conn.lineId);
+      }
+    });
+  }
+
+  state.connections.forEach(conn => {
+    if (movedIds.has(conn.lineId) || movedIds.has(conn.targetId)) {
+      if (conn.jointX != null) conn.jointX += dx;
+      if (conn.jointY != null) conn.jointY += dy;
+    }
+  });
+
+  return movedIds;
+}
+
+function hasBodyConnection(entId) {
+  if (entId == null) return false;
+  return state.connections.some(conn => {
+    if (conn.lineId !== entId && conn.targetId !== entId) return false;
+    return conn.endpoint === 'body' || conn.targetPoint === 'body';
+  });
+}
+
+function snapEntityEndpointsToNearbyEndpoints(ent) {
+  if (!ent || (ent.type !== 'line' && ent.type !== 'centerline' && ent.type !== 'arc')) {
+    return new Set();
+  }
+
+  const rebuildIds = new Set([ent.id]);
+  const endpoints = [
+    { key: 'start', x: ent.x1, y: ent.y1 },
+    { key: 'end', x: ent.x2, y: ent.y2 },
+  ];
+
+  endpoints.forEach(ep => {
+    const endpointConns = state.connections.filter(
+      c => c.lineId === ent.id && c.endpoint === ep.key
+    );
+    const snapTol = Math.max(2 / effectiveZoom(), 0.25);
+
+    endpointConns.forEach(conn => {
+      if (conn.targetPoint !== 'start' && conn.targetPoint !== 'end') return;
+      const target = state.entities.find(e => e.id === conn.targetId);
+      if (!target) return;
+
+    const targetPoint = conn.targetPoint === 'start'
+      ? { x: target.x1, y: target.y1 }
+      : { x: target.x2, y: target.y2 };
+    if (targetPoint.x == null || targetPoint.y == null) return;
+
+      const dist = Math.hypot(targetPoint.x - ep.x, targetPoint.y - ep.y);
+    if (dist > snapTol) return;
+
+    if (ep.key === 'start') {
+      if (ent.type === 'arc') {
+        if (!setArcEndpointKeepRadius(ent, 'start', targetPoint.x, targetPoint.y)) return;
+      } else {
+        ent.x1 = targetPoint.x;
+        ent.y1 = targetPoint.y;
+      }
+    } else {
+      if (ent.type === 'arc') {
+        if (!setArcEndpointKeepRadius(ent, 'end', targetPoint.x, targetPoint.y)) return;
+      } else {
+        ent.x2 = targetPoint.x;
+        ent.y2 = targetPoint.y;
+      }
+    }
+
+      rebuildIds.add(target.id);
+    });
+  });
+
+  return rebuildIds;
 }
 
 function updateLinkedDimensions(movedEnt, dx, dy) {
@@ -1272,26 +1920,7 @@ function updateLinkedDimensions(movedEnt, dx, dy) {
   state.entities.forEach(dim => {
     if (dim.type !== 'dimension') return;
     if (!dim.anchoredTo || dim.anchoredTo.length === 0) return;
-
-    let changed = false;
-
-    dim.anchoredTo.forEach(anchor => {
-      const anchoredEnt = state.entities.find(e => e.id === anchor.entityId);
-      if (!anchoredEnt) return;
-
-      if (anchor.entityId === movedEnt.id) {
-        if (dx !== 0 || dy !== 0) {
-          if (anchor.end === 'p1') { dim.x1 += dx; dim.y1 += dy; changed = true; }
-          if (anchor.end === 'p2') { dim.x2 += dx; dim.y2 += dy; changed = true; }
-        } else {
-          if (anchor.end === 'p1') { dim.x1 = anchoredEnt.x1; dim.y1 = anchoredEnt.y1; changed = true; }
-          if (anchor.end === 'p2') { dim.x2 = anchoredEnt.x2; dim.y2 = anchoredEnt.y2; changed = true; }
-        }
-      } else {
-        if (anchor.end === 'p1') { dim.x1 = anchoredEnt.x1; dim.y1 = anchoredEnt.y1; changed = true; }
-        if (anchor.end === 'p2') { dim.x2 = anchoredEnt.x2; dim.y2 = anchoredEnt.y2; changed = true; }
-      }
-    });
+    const changed = syncAnchoredDimension(dim, movedEnt, dx, dy);
 
     // Always clear text cache if anchored — so value updates on next render
     if (changed) dim.text = '';
@@ -1325,6 +1954,361 @@ function refreshArcGeometry(ent) {
   delete ent.endAngle;
 }
 
+function setArcRadiusKeepEndpoints(ent, newR) {
+  if (!ent || ent.type !== 'arc' || !isFinite(newR) || newR <= 0) return false;
+  const x1 = ent.x1, y1 = ent.y1, x2 = ent.x2, y2 = ent.y2;
+  const chordDx = x2 - x1;
+  const chordDy = y2 - y1;
+  const chord = Math.hypot(chordDx, chordDy);
+  if (chord < 1e-6) return false;
+
+  const halfChord = chord / 2;
+  if (newR < halfChord) return false;
+
+  const midX = (x1 + x2) / 2;
+  const midY = (y1 + y2) / 2;
+  const nx = -chordDy / chord;
+  const ny = chordDx / chord;
+
+  // Preserve current arc side (which side of the chord the arc bulges to).
+  const sideRefX = ent.ctrl ? ent.ctrl.x : (ent.cx ?? midX);
+  const sideRefY = ent.ctrl ? ent.ctrl.y : (ent.cy ?? midY);
+  const cross = chordDx * (sideRefY - y1) - chordDy * (sideRefX - x1);
+  const sideSign = cross >= 0 ? 1 : -1;
+
+  const centerOffset = Math.sqrt(Math.max(0, newR * newR - halfChord * halfChord));
+  const sagitta = newR - centerOffset;
+
+  const cx = midX + nx * sideSign * centerOffset;
+  const cy = midY + ny * sideSign * centerOffset;
+  const ctrlX = midX + nx * sideSign * sagitta;
+  const ctrlY = midY + ny * sideSign * sagitta;
+
+  ent.cx = cx;
+  ent.cy = cy;
+  ent.r = newR;
+  ent.ctrl = { x: ctrlX, y: ctrlY };
+  ent.startAngle = Math.atan2(y1 - cy, x1 - cx) * 180 / Math.PI;
+  ent.endAngle = Math.atan2(y2 - cy, x2 - cx) * 180 / Math.PI;
+  ent.sweepFlag = sideSign > 0 ? 0 : 1;
+  ent.isLine = false;
+  return true;
+}
+
+function setArcEndpointKeepRadius(ent, endpointKey, nextX, nextY) {
+  if (!ent || ent.type !== 'arc' || !isFinite(ent.r) || ent.r <= 0) return false;
+  if (endpointKey !== 'start' && endpointKey !== 'end') return false;
+  if (!isFinite(nextX) || !isFinite(nextY)) return false;
+  if (!isFinite(ent.cx) || !isFinite(ent.cy)) return false;
+
+  const oldSideCross = (ent.x2 - ent.x1) * ((ent.ctrl?.y ?? ent.cy) - ent.y1) -
+    (ent.y2 - ent.y1) * ((ent.ctrl?.x ?? ent.cx) - ent.x1);
+  const preservedSideSign = oldSideCross >= 0 ? 1 : -1;
+
+  const anchorPt = endpointKey === 'start'
+    ? { x: nextX, y: nextY }
+    : { x: ent.x1, y: ent.y1 };
+  const freePt = endpointKey === 'start'
+    ? { x: ent.x2, y: ent.y2 }
+    : { x: nextX, y: nextY };
+
+  const chordDx = freePt.x - anchorPt.x;
+  const chordDy = freePt.y - anchorPt.y;
+  const chord = Math.hypot(chordDx, chordDy);
+  if (chord < 1e-6 || chord > 2 * ent.r) return false;
+
+  const midX = (anchorPt.x + freePt.x) / 2;
+  const midY = (anchorPt.y + freePt.y) / 2;
+  const nx = -chordDy / chord;
+  const ny = chordDx / chord;
+  const centerOffset = Math.sqrt(Math.max(0, ent.r * ent.r - (chord * chord) / 4));
+  const sagitta = ent.r - centerOffset;
+
+  const cx = midX + nx * preservedSideSign * centerOffset;
+  const cy = midY + ny * preservedSideSign * centerOffset;
+  const ctrlX = midX + nx * preservedSideSign * sagitta;
+  const ctrlY = midY + ny * preservedSideSign * sagitta;
+
+  if (endpointKey === 'start') {
+    ent.x1 = nextX;
+    ent.y1 = nextY;
+  } else {
+    ent.x2 = nextX;
+    ent.y2 = nextY;
+  }
+
+  ent.cx = cx;
+  ent.cy = cy;
+  ent.ctrl = { x: ctrlX, y: ctrlY };
+  ent.startAngle = Math.atan2(ent.y1 - cy, ent.x1 - cx) * 180 / Math.PI;
+  ent.endAngle = Math.atan2(ent.y2 - cy, ent.x2 - cx) * 180 / Math.PI;
+  ent.sweepFlag = preservedSideSign > 0 ? 0 : 1;
+  ent.isLine = false;
+  return true;
+}
+
+function getArcEditAnchor(ent) {
+  if (!ent || ent.type !== 'arc') return null;
+  const startConnected = isEndpointConnected(ent.id, ent.x1, ent.y1);
+  const endConnected = isEndpointConnected(ent.id, ent.x2, ent.y2);
+  if (startConnected && !endConnected) return 'start';
+  if (endConnected && !startConnected) return 'end';
+  return null;
+}
+
+function getArcSignedSweepRadians(ent) {
+  if (!ent || ent.type !== 'arc' || !isFinite(ent.cx) || !isFinite(ent.cy)) return null;
+  const a1 = Math.atan2(ent.y1 - ent.cy, ent.x1 - ent.cx);
+  const a2 = Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
+  const ctrlA = ent.ctrl ? Math.atan2(ent.ctrl.y - ent.cy, ent.ctrl.x - ent.cx) : a1;
+  const norm = a => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const n1 = norm(a1);
+  const n2 = norm(a2);
+  const nc = norm(ctrlA);
+  let ccwSweep = n2 - n1;
+  if (ccwSweep < 0) ccwSweep += Math.PI * 2;
+  const ctrlOnCcw = ((nc - n1 + Math.PI * 2) % (Math.PI * 2)) <= ccwSweep;
+  return ctrlOnCcw ? ccwSweep : -(Math.PI * 2 - ccwSweep);
+}
+
+function setArcRadiusKeepLength(ent, newR, anchorKey = null) {
+  if (!ent || ent.type !== 'arc' || !isFinite(newR) || newR <= 0) return false;
+  if (!isFinite(ent.r) || ent.r <= 0 || !isFinite(ent.cx) || !isFinite(ent.cy)) return false;
+  if (anchorKey !== null && anchorKey !== 'start' && anchorKey !== 'end') return false;
+
+  const oldSignedSweep = getArcSignedSweepRadians(ent);
+  if (!isFinite(oldSignedSweep)) return false;
+
+  const oldArcLen = Math.abs(oldSignedSweep) * ent.r;
+  const minSweep = 1e-4;
+  const maxSweep = Math.PI * 2 - 1e-4;
+  const targetAbsSweep = oldArcLen / newR;
+  if (!isFinite(targetAbsSweep) || targetAbsSweep < minSweep || targetAbsSweep > maxSweep) return false;
+
+  const sweepSign = Math.sign(oldSignedSweep || 1);
+  const targetSignedSweep = sweepSign * targetAbsSweep;
+
+  let cx = ent.cx;
+  let cy = ent.cy;
+  let startAngle;
+  let endAngle;
+
+  if (anchorKey) {
+    const anchorPt = anchorKey === 'start'
+      ? { x: ent.x1, y: ent.y1 }
+      : { x: ent.x2, y: ent.y2 };
+    const anchorAngle = Math.atan2(anchorPt.y - ent.cy, anchorPt.x - ent.cx);
+    const anchorUnit = {
+      x: Math.cos(anchorAngle),
+      y: Math.sin(anchorAngle),
+    };
+    cx = anchorPt.x - anchorUnit.x * newR;
+    cy = anchorPt.y - anchorUnit.y * newR;
+
+    if (anchorKey === 'start') {
+      startAngle = anchorAngle;
+      endAngle = startAngle + targetSignedSweep;
+    } else {
+      endAngle = anchorAngle;
+      startAngle = endAngle - targetSignedSweep;
+    }
+  } else {
+    const oldStartAngle = Math.atan2(ent.y1 - ent.cy, ent.x1 - ent.cx);
+    const midAngle = oldStartAngle + oldSignedSweep / 2;
+    startAngle = midAngle - targetSignedSweep / 2;
+    endAngle = midAngle + targetSignedSweep / 2;
+  }
+
+  const newStart = { x: cx + newR * Math.cos(startAngle), y: cy + newR * Math.sin(startAngle) };
+  const newEnd = { x: cx + newR * Math.cos(endAngle), y: cy + newR * Math.sin(endAngle) };
+  const midAngle = startAngle + targetSignedSweep / 2;
+  const newCtrl = { x: cx + newR * Math.cos(midAngle), y: cy + newR * Math.sin(midAngle) };
+
+  ent.cx = cx;
+  ent.cy = cy;
+  ent.r = newR;
+  ent.x1 = newStart.x;
+  ent.y1 = newStart.y;
+  ent.x2 = newEnd.x;
+  ent.y2 = newEnd.y;
+  ent.ctrl = newCtrl;
+  refreshArcGeometry(ent);
+  return !ent.isLine;
+}
+
+function setArcRadiusFromAnchor(ent, newR, anchorKey) {
+  if (!ent || ent.type !== 'arc' || !isFinite(newR) || newR <= 0) return false;
+  if (!isFinite(ent.r) || ent.r <= 0 || ent.cx === undefined || ent.cy === undefined) return false;
+  if (anchorKey !== 'start' && anchorKey !== 'end') return false;
+
+  const oldSideCross = (ent.x2 - ent.x1) * ((ent.ctrl?.y ?? ent.cy) - ent.y1) -
+    (ent.y2 - ent.y1) * ((ent.ctrl?.x ?? ent.cx) - ent.x1);
+  const preservedSideSign = oldSideCross >= 0 ? 1 : -1;
+
+  const anchorPt = anchorKey === 'start'
+    ? { x: ent.x1, y: ent.y1 }
+    : { x: ent.x2, y: ent.y2 };
+  const freePt = anchorKey === 'start'
+    ? { x: ent.x2, y: ent.y2 }
+    : { x: ent.x1, y: ent.y1 };
+
+  const oldR = ent.r;
+  const anchorUnit = {
+    x: (anchorPt.x - ent.cx) / oldR,
+    y: (anchorPt.y - ent.cy) / oldR,
+  };
+  const freeUnit = {
+    x: (freePt.x - ent.cx) / oldR,
+    y: (freePt.y - ent.cy) / oldR,
+  };
+
+  const newCx = anchorPt.x - anchorUnit.x * newR;
+  const newCy = anchorPt.y - anchorUnit.y * newR;
+  const newFree = {
+    x: newCx + freeUnit.x * newR,
+    y: newCy + freeUnit.y * newR,
+  };
+
+  if (anchorKey === 'start') {
+    ent.x2 = newFree.x;
+    ent.y2 = newFree.y;
+  } else {
+    ent.x1 = newFree.x;
+    ent.y1 = newFree.y;
+  }
+
+  ent.cx = newCx;
+  ent.cy = newCy;
+  ent.r = newR;
+
+  const chordDx = ent.x2 - ent.x1;
+  const chordDy = ent.y2 - ent.y1;
+  const chord = Math.hypot(chordDx, chordDy);
+  if (chord < 1e-6 || newR < chord / 2) return false;
+
+  const midX = (ent.x1 + ent.x2) / 2;
+  const midY = (ent.y1 + ent.y2) / 2;
+  const nx = -chordDy / chord;
+  const ny = chordDx / chord;
+  const centerOffset = Math.sqrt(Math.max(0, newR * newR - (chord * chord) / 4));
+  const sagitta = newR - centerOffset;
+  ent.ctrl = {
+    x: midX + nx * preservedSideSign * sagitta,
+    y: midY + ny * preservedSideSign * sagitta,
+  };
+  refreshArcGeometry(ent);
+  return !ent.isLine;
+}
+
+function setArcChordFromAnchor(ent, newChord, anchorKey) {
+  if (!ent || ent.type !== 'arc' || !isFinite(newChord) || newChord <= 0) return false;
+  if (!isFinite(ent.r) || ent.r <= 0 || ent.cx === undefined || ent.cy === undefined) return false;
+  if (newChord >= 2 * ent.r) return false;
+  if (anchorKey !== 'start' && anchorKey !== 'end') return false;
+
+  const oldSideCross = (ent.x2 - ent.x1) * ((ent.ctrl?.y ?? ent.cy) - ent.y1) -
+    (ent.y2 - ent.y1) * ((ent.ctrl?.x ?? ent.cx) - ent.x1);
+  const preservedSideSign = oldSideCross >= 0 ? 1 : -1;
+
+  const a1 = Math.atan2(ent.y1 - ent.cy, ent.x1 - ent.cx);
+  const a2 = Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
+  const ctrlA = ent.ctrl ? Math.atan2(ent.ctrl.y - ent.cy, ent.ctrl.x - ent.cx) : a1;
+  const norm = a => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const n1 = norm(a1);
+  const n2 = norm(a2);
+  const nc = norm(ctrlA);
+  let ccwSweep = n2 - n1;
+  if (ccwSweep < 0) ccwSweep += Math.PI * 2;
+  const ctrlOnCcw = ((nc - n1 + Math.PI * 2) % (Math.PI * 2)) <= ccwSweep;
+  const signedSweep = ctrlOnCcw ? ccwSweep : -(Math.PI * 2 - ccwSweep);
+  const newAbsSweep = 2 * Math.asin(Math.max(-1, Math.min(1, newChord / (2 * ent.r))));
+  const nextSweep = Math.sign(signedSweep || 1) * newAbsSweep;
+
+  if (anchorKey === 'start') {
+    const newAngle = a1 + nextSweep;
+    ent.x2 = ent.cx + ent.r * Math.cos(newAngle);
+    ent.y2 = ent.cy + ent.r * Math.sin(newAngle);
+  } else {
+    const newAngle = a2 - nextSweep;
+    ent.x1 = ent.cx + ent.r * Math.cos(newAngle);
+    ent.y1 = ent.cy + ent.r * Math.sin(newAngle);
+  }
+
+  const chordDx = ent.x2 - ent.x1;
+  const chordDy = ent.y2 - ent.y1;
+  const chord = Math.hypot(chordDx, chordDy);
+  if (chord < 1e-6) return false;
+  const midX = (ent.x1 + ent.x2) / 2;
+  const midY = (ent.y1 + ent.y2) / 2;
+  const nx = -chordDy / chord;
+  const ny = chordDx / chord;
+  const centerOffset = Math.sqrt(Math.max(0, ent.r * ent.r - (chord * chord) / 4));
+  const sagitta = ent.r - centerOffset;
+  ent.ctrl = {
+    x: midX + nx * preservedSideSign * sagitta,
+    y: midY + ny * preservedSideSign * sagitta,
+  };
+  refreshArcGeometry(ent);
+  return !ent.isLine;
+}
+
+function setArcChordKeepRadius(ent, newChord) {
+  if (!ent || ent.type !== 'arc' || !isFinite(newChord) || newChord <= 0) return false;
+  if (!isFinite(ent.r) || ent.r <= 0 || ent.cx === undefined || ent.cy === undefined) return false;
+  if (newChord >= 2 * ent.r) return false;
+
+  const oldSideCross = (ent.x2 - ent.x1) * ((ent.ctrl?.y ?? ent.cy) - ent.y1) -
+    (ent.y2 - ent.y1) * ((ent.ctrl?.x ?? ent.cx) - ent.x1);
+  const preservedSideSign = oldSideCross >= 0 ? 1 : -1;
+
+  const a1 = Math.atan2(ent.y1 - ent.cy, ent.x1 - ent.cx);
+  const a2 = Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
+  const ctrlA = ent.ctrl ? Math.atan2(ent.ctrl.y - ent.cy, ent.ctrl.x - ent.cx) : a1;
+  const norm = a => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+  const n1 = norm(a1);
+  const n2 = norm(a2);
+  const nc = norm(ctrlA);
+  let ccwSweep = n2 - n1;
+  if (ccwSweep < 0) ccwSweep += Math.PI * 2;
+  const ctrlOnCcw = ((nc - n1 + Math.PI * 2) % (Math.PI * 2)) <= ccwSweep;
+  const signedSweep = ctrlOnCcw ? ccwSweep : -(Math.PI * 2 - ccwSweep);
+  const newAbsSweep = 2 * Math.asin(Math.max(-1, Math.min(1, newChord / (2 * ent.r))));
+  const nextSweep = Math.sign(signedSweep || preservedSideSign || 1) * newAbsSweep;
+  const midAngle = a1 + signedSweep / 2;
+
+  const newA1 = midAngle - nextSweep / 2;
+  const newA2 = midAngle + nextSweep / 2;
+
+  ent.x1 = ent.cx + ent.r * Math.cos(newA1);
+  ent.y1 = ent.cy + ent.r * Math.sin(newA1);
+  ent.x2 = ent.cx + ent.r * Math.cos(newA2);
+  ent.y2 = ent.cy + ent.r * Math.sin(newA2);
+
+  const chordDx = ent.x2 - ent.x1;
+  const chordDy = ent.y2 - ent.y1;
+  const chord = Math.hypot(chordDx, chordDy);
+  if (chord < 1e-6) return false;
+
+  const midX = (ent.x1 + ent.x2) / 2;
+  const midY = (ent.y1 + ent.y2) / 2;
+  const nx = -chordDy / chord;
+  const ny = chordDx / chord;
+  const centerOffset = Math.sqrt(Math.max(0, ent.r * ent.r - (chord * chord) / 4));
+  const sagitta = ent.r - centerOffset;
+  ent.ctrl = {
+    x: midX + nx * preservedSideSign * sagitta,
+    y: midY + ny * preservedSideSign * sagitta,
+  };
+  refreshArcGeometry(ent);
+  return !ent.isLine;
+}
+
+function shiftArcCtrlForEndpointMove(ent, oldX, oldY, newX, newY) {
+  if (!ent || ent.type !== 'arc' || !ent.ctrl) return;
+  ent.ctrl.x += (newX - oldX) / 2;
+  ent.ctrl.y += (newY - oldY) / 2;
+}
+
 function stretchAnchoredEntity(anchorX, anchorY, dx, dy) {
   const TOL = 0.5;
 
@@ -1336,15 +2320,21 @@ function stretchAnchoredEntity(anchorX, anchorY, dx, dy) {
       let moved = false;
 
       if (Math.hypot(ent.x1 - anchorX, ent.y1 - anchorY) < TOL) {
-        ent.x1 += dx;
-        ent.y1 += dy;
-        if (ent.type === 'arc' && ent.ctrl) refreshArcGeometry(ent);
+        if (ent.type === 'arc') {
+          if (!setArcEndpointKeepRadius(ent, 'start', ent.x1 + dx, ent.y1 + dy)) return;
+        } else {
+          ent.x1 += dx;
+          ent.y1 += dy;
+        }
         moved = true;
       }
       if (Math.hypot(ent.x2 - anchorX, ent.y2 - anchorY) < TOL) {
-        ent.x2 += dx;
-        ent.y2 += dy;
-        if (ent.type === 'arc' && ent.ctrl) refreshArcGeometry(ent);
+        if (ent.type === 'arc') {
+          if (!setArcEndpointKeepRadius(ent, 'end', ent.x2 + dx, ent.y2 + dy)) return;
+        } else {
+          ent.x2 += dx;
+          ent.y2 += dy;
+        }
         moved = true;
       }
 
@@ -1517,6 +2507,21 @@ function snapToGrid(x, y, shiftHeld) {
   return {
     x: Math.round(x / snapStep) * snapStep,
     y: Math.round(y / snapStep) * snapStep,
+  };
+}
+
+function snapPointToAngle(anchor, point, stepDeg = ANGLE_SNAP_STEP_DEG) {
+  if (!anchor || !point) return point;
+  const dx = point.x - anchor.x;
+  const dy = point.y - anchor.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-9) return { x: point.x, y: point.y };
+  const stepRad = (stepDeg * Math.PI) / 180;
+  const angle = Math.atan2(dy, dx);
+  const snappedAngle = Math.round(angle / stepRad) * stepRad;
+  return {
+    x: anchor.x + Math.cos(snappedAngle) * len,
+    y: anchor.y + Math.sin(snappedAngle) * len,
   };
 }
 
@@ -1745,24 +2750,56 @@ function showSnapMarker(svgX, svgY, snapType) {
 // КОНВЕРТАЦІЯ КООРДИНАТ
 // ═══════════════════════════════════════════════
 
-function effectiveZoom() { return state.zoom * BASE_ZOOM; }
+let _cadViewportWarned = false;
+
+function getCadViewport() {
+  return (
+    cadViewport ||
+    window.cadViewport ||
+    (window.CADIntegration && window.CADIntegration.viewport) ||
+    null
+  );
+}
+
+function effectiveZoom() {
+  const vp = getCadViewport();
+  if (!vp) {
+    if (!_cadViewportWarned) {
+      console.warn('[APP] cadViewport not ready, using fallback effectiveZoom=1');
+      _cadViewportWarned = true;
+    }
+    return 1;
+  }
+  return typeof vp.effectiveZoom === 'function'
+    ? vp.effectiveZoom()
+    : (vp.zoom || 1);
+}
 
 function screenToWorld(clientX, clientY) {
-  const rect = viewport.getBoundingClientRect();
-  const vx = clientX - rect.left, vy = clientY - rect.top;
-  const ez = effectiveZoom();
-  return { x: (vx - state.panX) / ez, y: (vy - state.panY) / ez };
+  const vp = getCadViewport();
+  if (!vp) {
+    if (!_cadViewportWarned) {
+      console.warn('[APP] cadViewport not ready, returning screen coords as-is');
+      _cadViewportWarned = true;
+    }
+    return { x: clientX, y: clientY };
+  }
+  return typeof vp.screenToWorld === 'function'
+    ? vp.screenToWorld(clientX, clientY)
+    : { x: clientX, y: clientY };
 }
 
 function worldToSVG(wx, wy) {
-  const ez = effectiveZoom();
-  let x = wx * ez + state.panX;
-  let y = wy * ez + state.panY;
-  // Clamp to prevent huge SVG coords that lock up the renderer at extreme zoom
+  const vp = getCadViewport();
+  if (!vp || typeof vp.worldToSVG !== 'function') {
+    return { x: wx, y: wy };
+  }
+  const p = vp.worldToSVG(wx, wy);
   const LIMIT = 100000;
-  if (x < -LIMIT) x = -LIMIT; else if (x > LIMIT) x = LIMIT;
-  if (y < -LIMIT) y = -LIMIT; else if (y > LIMIT) y = LIMIT;
-  return { x, y };
+  return {
+    x: p.x < -LIMIT ? -LIMIT : p.x > LIMIT ? LIMIT : p.x,
+    y: p.y < -LIMIT ? -LIMIT : p.y > LIMIT ? LIMIT : p.y
+  };
 }
 
 // Coarse entity bounding box (in world/mm) used for viewport culling.
@@ -2308,7 +3345,7 @@ function addDefaultDimension(ent) {
       type: 'dimension',
       lineType: 'solid_thin',
       color: '#000000',
-      dimType: isH || isV ? 'linear' : 'aligned',
+      dimType: 'linear',
       x1: ent.x1, y1: ent.y1,
       x2: ent.x2, y2: ent.y2,
       offset: isV ? -off : off,
@@ -2346,22 +3383,17 @@ function addDefaultDimension(ent) {
       lineType: 'solid_thin', color: '#000000', dimType: 'linear',
       x1: ent.cx - ent.r, y1: ent.cy,
       x2: ent.cx + ent.r, y2: ent.cy,
-      offset: off, text: '', isDiameter: true, isRadius: false,
+      offset: off, text: '', dimKind: 'diameter', isDiameter: true, isRadius: false,
       anchoredTo: makeAnchors(ent.id, true, true),
     });
 
   } else if (ent.type === 'arc') {
-    if (ent.isLine || !isFinite(ent.r)) return;
-    const midAngle = (ent.startAngle + ent.endAngle) / 2;
-    state.entities.push({
-      id: state.nextId++, type: 'dimension',
-      lineType: 'solid_thin', color: '#000000', dimType: 'linear',
-      x1: ent.cx, y1: ent.cy,
-      x2: ent.cx + ent.r * Math.cos(midAngle),
-      y2: ent.cy + ent.r * Math.sin(midAngle),
-      offset: 0, text: '', isDiameter: false, isRadius: true,
-      anchoredTo: makeAnchors(ent.id, true, true),
-    });
+    if (ent.isLine || !isFinite(ent.r)) {
+      addDefaultDimension({ ...ent, type: 'line' });
+      return;
+    }
+    const dim = createRadiusDimensionForArc(ent);
+    if (dim) state.entities.push(dim);
   }
 }
 
@@ -2574,21 +3606,45 @@ function showBatchAnnotateDialog(entities) {
   dialog.addEventListener('mouseenter', () => clearTimeout(timer));
 }
 
-function autoAnnotate(ent) {
+function autoAnnotate(ent, options = {}) {
   if (!AUTO_ANNOTATE.enabled) return;
   if (!ent) return;
-  switch (ent.type) {
-    case 'line':      autoAnnotateLine(ent);     break;
-    case 'rect':      autoAnnotateRect(ent);     break;
-    case 'circle':    autoAnnotateCircle(ent);   break;
-    case 'arc':       autoAnnotateArc(ent);      break;
-    case 'polyline':  autoAnnotatePolyline(ent); break;
+  const mergeWithCurrentUndo = options.mergeWithCurrentUndo === true;
+  const prevSuspendSnapshot = state.suspendSnapshot;
+  if (mergeWithCurrentUndo) state.suspendSnapshot = true;
+  try {
+    switch (ent.type) {
+      case 'line':      autoAnnotateLine(ent);     break;
+      case 'centerline':autoAnnotateLine(ent);     break;
+      case 'rect':      autoAnnotateRect(ent);     break;
+      case 'circle':    autoAnnotateCircle(ent);   break;
+      case 'arc':       autoAnnotateArc(ent);      break;
+      case 'polyline':  autoAnnotatePolyline(ent); break;
+    }
+    // Ensure freshly created auto-dimensions are immediately synchronized
+    // with the source geometry (no "floating far away" first frame).
+    if (ent && ent.id != null) {
+      updateLinkedDimensions(ent, 0, 0);
+      clearDimTextCacheForEntity(ent.id);
+      render();
+    }
+  } finally {
+    state.suspendSnapshot = prevSuspendSnapshot;
   }
 }
 
 function showAnnotateDialog(ent, options, onConfirm) {
-  if (!AUTO_ANNOTATE.showDialog) { return; }
   if (!options || options.length === 0) { return; }
+  if (!AUTO_ANNOTATE.showDialog || options.length === 1) {
+    try {
+      const autoOpt = options.find(opt => opt.autoDefault) || options[0];
+      autoOpt.action();
+      if (onConfirm) onConfirm(autoOpt);
+    } catch (err) {
+      console.error('Auto annotate failed:', err);
+    }
+    return;
+  }
 
   const old = document.getElementById('annotate-dialog');
   if (old) old.remove();
@@ -2687,6 +3743,8 @@ function autoAnnotateLine(ent) {
   const dx  = ent.x2 - ent.x1;
   const dy  = ent.y2 - ent.y1;
   const len = Math.sqrt(dx * dx + dy * dy);
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
 
   const isStrictHoriz = Math.abs(dy) < 0.1;
   const isStrictVert  = Math.abs(dx) < 0.1;
@@ -2695,86 +3753,79 @@ function autoAnnotateLine(ent) {
   const off = AUTO_ANNOTATE.offsetDefault;
   const options = [];
 
+  const addLinearX = (statusText = `↔ По ширині: ${absDx.toFixed(1)} мм`, extraOffset = 1.0) => {
+    const yBase = Math.max(ent.y1, ent.y2) + off * extraOffset;
+    state.entities.push({
+      id: state.nextId++, type: 'dimension',
+      lineType: 'solid_thin', color: '#000000',
+      dimType: 'linear',
+      x1: Math.min(ent.x1, ent.x2), y1: yBase,
+      x2: Math.max(ent.x1, ent.x2), y2: yBase,
+      offset: 0, text: '', isDiameter: false, isRadius: false,
+      anchoredTo: makeAnchors(ent.id, true, true),
+    });
+    saveSnapshot(); render();
+    showStatus(statusText);
+  };
+
+  const addLinearY = (statusText = `↕ По висоті: ${absDy.toFixed(1)} мм`, extraOffset = 1.0) => {
+    const xBase = Math.max(ent.x1, ent.x2) + off * extraOffset;
+    state.entities.push({
+      id: state.nextId++, type: 'dimension',
+      lineType: 'solid_thin', color: '#000000',
+      dimType: 'linear',
+      x1: xBase, y1: Math.min(ent.y1, ent.y2),
+      x2: xBase, y2: Math.max(ent.y1, ent.y2),
+      offset: 0, text: '', isDiameter: false, isRadius: false,
+      anchoredTo: makeAnchors(ent.id, true, true),
+    });
+    saveSnapshot(); render();
+    showStatus(statusText);
+  };
+
   if (isDiagonal) {
+    if (absDx >= absDy) {
+      options.push({
+        label: `${iconHtml('horizontal',12)} По ширині (${absDx.toFixed(1)} мм)`,
+        action: () => addLinearX(`↔ По ширині: ${absDx.toFixed(1)} мм`, 1.0),
+      });
+      options.push({
+        label: `${iconHtml('vertical',12)} По висоті (${absDy.toFixed(1)} мм)`,
+        action: () => addLinearY(`↕ По висоті: ${absDy.toFixed(1)} мм`, 1.0),
+      });
+    } else {
+      options.push({
+        label: `${iconHtml('vertical',12)} По висоті (${absDy.toFixed(1)} мм)`,
+        action: () => addLinearY(`↕ По висоті: ${absDy.toFixed(1)} мм`, 1.0),
+      });
+      options.push({
+        label: `${iconHtml('horizontal',12)} По ширині (${absDx.toFixed(1)} мм)`,
+        action: () => addLinearX(`↔ По ширині: ${absDx.toFixed(1)} мм`, 1.0),
+      });
+    }
     options.push({
-      label: `${iconHtml('dimension',12)} Довжина вздовж (${len.toFixed(1)} мм)`,
+      label: `${iconHtml('dimension',12)} Всі (X + Y)`,
       action: () => {
-        state.entities.push({
-          id: state.nextId++, type: 'dimension',
-          lineType: 'solid_thin', color: '#000000',
-          dimType: 'aligned',
-          x1: ent.x1, y1: ent.y1, x2: ent.x2, y2: ent.y2,
-          offset: off, text: '', isDiameter: false, isRadius: false,
-          anchoredTo: makeAnchors(ent.id, true, true),
-        });
-        saveSnapshot(); render();
-        showStatus(`Похилий розмір: ${len.toFixed(1)} мм`);
-      }
-    });
-    options.push({
-      label: `${iconHtml('horizontal',12)} Проекція X (${Math.abs(dx).toFixed(1)} мм)`,
-      action: () => {
-        const yBase = Math.max(ent.y1, ent.y2) + off;
-        state.entities.push({
-          id: state.nextId++, type: 'dimension',
-          lineType: 'solid_thin', color: '#000000',
-          dimType: 'linear',
-          x1: Math.min(ent.x1, ent.x2), y1: yBase,
-          x2: Math.max(ent.x1, ent.x2), y2: yBase,
-          offset: 0, text: '', isDiameter: false, isRadius: false,
-          anchoredTo: makeAnchors(ent.id, true, true),
-        });
-        saveSnapshot(); render();
-        showStatus(`↔ Горизонтальна проекція: ${Math.abs(dx).toFixed(1)} мм`);
-      }
-    });
-    options.push({
-      label: `${iconHtml('vertical',12)} Проекція Y (${Math.abs(dy).toFixed(1)} мм)`,
-      action: () => {
-        const xBase = Math.max(ent.x1, ent.x2) + off;
-        state.entities.push({
-          id: state.nextId++, type: 'dimension',
-          lineType: 'solid_thin', color: '#000000',
-          dimType: 'linear',
-          x1: xBase, y1: Math.min(ent.y1, ent.y2),
-          x2: xBase, y2: Math.max(ent.y1, ent.y2),
-          offset: 0, text: '', isDiameter: false, isRadius: false,
-          anchoredTo: makeAnchors(ent.id, true, true),
-        });
-        saveSnapshot(); render();
-        showStatus(`↕ Вертикальна проекція: ${Math.abs(dy).toFixed(1)} мм`);
-      }
-    });
-    options.push({
-      label: `${iconHtml('dimension',12)} Всі (L + X + Y)`,
-      action: () => {
-        state.entities.push({
-          id: state.nextId++, type: 'dimension',
-          lineType: 'solid_thin', color: '#000000', dimType: 'aligned',
-          x1: ent.x1, y1: ent.y1, x2: ent.x2, y2: ent.y2,
-          offset: off, text: '', isDiameter: false, isRadius: false,
-          anchoredTo: makeAnchors(ent.id, true, true),
-        });
         const yBase = Math.max(ent.y1, ent.y2) + off * 1.8;
-        state.entities.push({
-          id: state.nextId++, type: 'dimension',
-          lineType: 'solid_thin', color: '#000000', dimType: 'linear',
-          x1: Math.min(ent.x1, ent.x2), y1: yBase,
-          x2: Math.max(ent.x1, ent.x2), y2: yBase,
-          offset: 0, text: '', isDiameter: false, isRadius: false,
-          anchoredTo: makeAnchors(ent.id, true, true),
-        });
         const xBase = Math.max(ent.x1, ent.x2) + off * 1.8;
         state.entities.push({
           id: state.nextId++, type: 'dimension',
           lineType: 'solid_thin', color: '#000000', dimType: 'linear',
+          x1: Math.min(ent.x1, ent.x2), y1: yBase,
+          x2: Math.max(ent.x1, ent.x2), y2: yBase,
+          offset: 0, text: '', isDiameter: false, isRadius: false,
+          anchoredTo: makeAnchors(ent.id, true, true),
+        });
+        state.entities.push({
+          id: state.nextId++, type: 'dimension',
+          lineType: 'solid_thin', color: '#000000', dimType: 'linear',
           x1: xBase, y1: Math.min(ent.y1, ent.y2),
           x2: xBase, y2: Math.max(ent.y1, ent.y2),
           offset: 0, text: '', isDiameter: false, isRadius: false,
           anchoredTo: makeAnchors(ent.id, true, true),
         });
         saveSnapshot(); render();
-        showStatus(`Всі розміри: ${len.toFixed(1)} + ${Math.abs(dx).toFixed(1)} + ${Math.abs(dy).toFixed(1)} мм`);
+        showStatus(`Всі розміри: ${absDx.toFixed(1)} + ${absDy.toFixed(1)} мм`);
       }
     });
   } else if (isStrictHoriz) {
@@ -2923,7 +3974,7 @@ function autoAnnotateCircle(ent) {
           lineType: 'solid_thin', color: '#000000', dimType: 'linear',
           x1: ent.cx - ent.r, y1: ent.cy,
           x2: ent.cx + ent.r, y2: ent.cy,
-          offset: -off, text: '',
+          offset: -off, text: '', dimKind: 'diameter',
           isDiameter: true, isRadius: false,
           anchoredTo: makeAnchors(ent.id, true, true),
         });
@@ -2940,7 +3991,7 @@ function autoAnnotateCircle(ent) {
           x1: ent.cx, y1: ent.cy,
           x2: ent.cx + ent.r * Math.cos(-Math.PI/4),
           y2: ent.cy + ent.r * Math.sin(-Math.PI/4),
-          offset: 0, text: '',
+          offset: 0, text: '', dimKind: 'radius',
           isDiameter: false, isRadius: true,
           anchoredTo: makeAnchors(ent.id, true, true),
         });
@@ -2977,7 +4028,7 @@ function autoAnnotateCircle(ent) {
           lineType: 'solid_thin', color: '#000000', dimType: 'linear',
           x1: ent.cx - ent.r, y1: ent.cy,
           x2: ent.cx + ent.r, y2: ent.cy,
-          offset: -off, text: '', isDiameter: true, isRadius: false,
+          offset: -off, text: '', dimKind: 'diameter', isDiameter: true, isRadius: false,
           anchoredTo: makeAnchors(ent.id, true, true),
         });
         state.entities.push({
@@ -3000,29 +4051,118 @@ function autoAnnotateCircle(ent) {
 }
 
 function autoAnnotateArc(ent) {
-  if (ent.isLine || !isFinite(ent.r)) return;
+  if (ent.isLine || !isFinite(ent.r)) {
+    autoAnnotateLine({ ...ent, type: 'line' });
+    return;
+  }
   const r = ent.r ? ent.r.toFixed(1) : '?';
+  const dx = ent.x2 - ent.x1;
+  const dy = ent.y2 - ent.y1;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  const preferX = absDx >= absDy;
+  const minX = Math.min(ent.x1, ent.x2);
+  const maxX = Math.max(ent.x1, ent.x2);
+  const minY = Math.min(ent.y1, ent.y2);
+  const maxY = Math.max(ent.y1, ent.y2);
+  const arcLen = Math.abs(ent.r * (() => {
+    const a1 = Math.atan2(ent.y1 - ent.cy, ent.x1 - ent.cx);
+    const a2 = Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
+    const ctrlA = ent.ctrl ? Math.atan2(ent.ctrl.y - ent.cy, ent.ctrl.x - ent.cx) : a1;
+    const norm = a => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const n1 = norm(a1);
+    const n2 = norm(a2);
+    const nc = norm(ctrlA);
+    let ccw = n2 - n1;
+    if (ccw < 0) ccw += Math.PI * 2;
+    const ctrlOnCcw = ((nc - n1 + Math.PI * 2) % (Math.PI * 2)) <= ccw;
+    return ctrlOnCcw ? ccw : (Math.PI * 2 - ccw);
+  })());
+  const off = AUTO_ANNOTATE.offsetDefault;
 
   showAnnotateDialog(ent, [
     {
       label: `${iconHtml('radius',12)} Радіус R${r} мм`,
       action: () => {
-        if (ent.cx === undefined || !ent.r) return;
-        const midAngle = ent.startAngle !== undefined && ent.endAngle !== undefined
-          ? (ent.startAngle + ent.endAngle) / 2
-          : 0;
+        const dim = createRadiusDimensionForArc(ent);
+        if (!dim) return;
+        state.entities.push(dim);
+        saveSnapshot(); render();
+        showStatus(`↗ Радіус R${r} мм`);
+      }
+    },
+    {
+      label: `${iconHtml('dimension',12)} Довжина дуги (${arcLen.toFixed(1)} мм)`,
+      action: () => {
+        const midX = (ent.x1 + ent.x2) / 2;
+        const midY = (ent.y1 + ent.y2) / 2;
+        const isHorizontalDim = absDx >= absDy;
+
+        if (isHorizontalDim) {
+          const placeTop = ent.cy <= midY;
+          const yBase = placeTop
+            ? Math.min(minY, ent.cy - ent.r) - off * 1.4
+            : Math.max(maxY, ent.cy + ent.r) + off * 1.4;
+          state.entities.push({
+            id: state.nextId++, type: 'dimension',
+            lineType: 'solid_thin', color: '#000000', dimType: 'linear',
+            x1: minX, y1: yBase, x2: maxX, y2: yBase,
+            offset: 0, text: arcLen.toFixed(1), isDiameter: false, isRadius: false,
+            anchoredTo: makeAnchors(ent.id, true, true),
+            dimKind: 'arc_length',
+          });
+        } else {
+          const placeLeft = ent.cx <= midX;
+          const xBase = placeLeft
+            ? Math.min(minX, ent.cx - ent.r) - off * 1.4
+            : Math.max(maxX, ent.cx + ent.r) + off * 1.4;
+          state.entities.push({
+            id: state.nextId++, type: 'dimension',
+            lineType: 'solid_thin', color: '#000000', dimType: 'linear',
+            x1: xBase, y1: minY, x2: xBase, y2: maxY,
+            offset: 0, text: arcLen.toFixed(1), isDiameter: false, isRadius: false,
+            anchoredTo: makeAnchors(ent.id, true, true),
+            dimKind: 'arc_length',
+          });
+        }
+        saveSnapshot(); render();
+        showStatus(`Довжина дуги: ${arcLen.toFixed(1)} мм`);
+      }
+    },
+    {
+      label: `${iconHtml('horizontal',12)} Проекція X (${Math.abs(dx).toFixed(1)} мм)`,
+      autoDefault: preferX,
+      action: () => {
+        const yBase = maxY + off;
         state.entities.push({
           id: state.nextId++, type: 'dimension',
-          lineType: 'solid_thin', color: '#000000', dimType: 'linear',
-          x1: ent.cx, y1: ent.cy,
-          x2: ent.cx + ent.r * Math.cos(midAngle),
-          y2: ent.cy + ent.r * Math.sin(midAngle),
-          offset: 0, text: '',
-          isDiameter: false, isRadius: true,
+          lineType: 'solid_thin', color: '#000000',
+          dimType: 'linear',
+          x1: minX, y1: yBase,
+          x2: maxX, y2: yBase,
+          offset: 0, text: '', isDiameter: false, isRadius: false,
           anchoredTo: makeAnchors(ent.id, true, true),
         });
         saveSnapshot(); render();
-        showStatus(`↗ Радіус R${r} мм`);
+        showStatus(`↔ Проекція X: ${Math.abs(dx).toFixed(1)} мм`);
+      }
+    },
+    {
+      label: `${iconHtml('vertical',12)} Проекція Y (${Math.abs(dy).toFixed(1)} мм)`,
+      autoDefault: !preferX,
+      action: () => {
+        const xBase = maxX + off;
+        state.entities.push({
+          id: state.nextId++, type: 'dimension',
+          lineType: 'solid_thin', color: '#000000',
+          dimType: 'linear',
+          x1: xBase, y1: minY,
+          x2: xBase, y2: maxY,
+          offset: 0, text: '', isDiameter: false, isRadius: false,
+          anchoredTo: makeAnchors(ent.id, true, true),
+        });
+        saveSnapshot(); render();
+        showStatus(`↕ Проекція Y: ${Math.abs(dy).toFixed(1)} мм`);
       }
     },
     {
@@ -3075,14 +4215,9 @@ function autoAnnotatePolyline(ent) {
           const slen = Math.sqrt(sdx*sdx + sdy*sdy);
           if (slen < 0.5) continue;
 
-          // Визначити тип розміру для сегменту
-          const segIsHoriz = Math.abs(sdy) < 0.1;
-          const segIsVert  = Math.abs(sdx) < 0.1;
-          const segDimType = (segIsHoriz || segIsVert) ? 'linear' : 'aligned';
-
           state.entities.push({
             id: state.nextId++, type: 'dimension',
-            lineType: 'solid_thin', color: '#000000', dimType: segDimType,
+            lineType: 'solid_thin', color: '#000000', dimType: 'linear',
             x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
             offset: off, text: '', isDiameter: false, isRadius: false,
             anchoredTo: makeAnchors(ent.id, true, true),
@@ -3125,12 +4260,39 @@ function autoAnnotatePolyline(ent) {
 }
 
 function saveSnapshot() {
+  if (state.suspendSnapshot) {
+    if (state.historyIndex >= 0 && state.history[state.historyIndex]) {
+      // Merge changes into current undo step (used by auto-annotation after creating entity).
+      state.history[state.historyIndex] = deepCopyEntities(state.entities);
+    } else {
+      state.history = [deepCopyEntities(state.entities)];
+      state.historyIndex = 0;
+    }
+    updateUndoRedoButtons();
+    markActiveProjectDirty();
+    if (state.quickEditorMode && !state.quickEditorPendingRefresh) {
+      state.quickEditorPendingRefresh = true;
+      setTimeout(() => {
+        state.quickEditorPendingRefresh = false;
+        refreshQuickEditorPanel();
+      }, 0);
+    }
+    return;
+  }
+
   state.history = state.history.slice(0, state.historyIndex + 1);
   state.history.push(deepCopyEntities(state.entities));
   if (state.history.length > 50) state.history.shift();
   else state.historyIndex++;
   updateUndoRedoButtons();
   markActiveProjectDirty();
+  if (state.quickEditorMode && !state.quickEditorPendingRefresh) {
+    state.quickEditorPendingRefresh = true;
+    setTimeout(() => {
+      state.quickEditorPendingRefresh = false;
+      refreshQuickEditorPanel();
+    }, 0);
+  }
 }
 
 function markActiveProjectDirty() {
@@ -3182,7 +4344,44 @@ function updateUndoRedoButtons() {
 // ═══════════════════════════════════════════════
 
 function showPropsPanel(ent) {
-  if (!ent) { propsPanel.style.display='none'; return; }
+  if (state.quickEditorMode) {
+    propsPanel.style.display = 'none';
+    return;
+  }
+  if (!ent) {
+    const selectedArcs = [...(state.selectedIds || new Set())]
+      .map(id => state.entities.find(e => e.id === id))
+      .filter(e => e && e.type === 'arc' && !e.isLine);
+    const canBatchEditArcs = selectedArcs.length >= 2 && selectedArcs.length === (state.selectedIds?.size || 0);
+    if (!canBatchEditArcs) { propsPanel.style.display='none'; return; }
+
+    propsPanel.style.display='block';
+    propsBody.innerHTML='';
+    propsTitle.textContent=`Дуги (${selectedArcs.length})`;
+    addPropLabel('Спільне редагування вибраних дуг');
+    addPropSeparator();
+
+    const avgRadius = selectedArcs.reduce((sum, arc) => sum + (arc.r || 0), 0) / selectedArcs.length;
+    addPropField('Радіус для всіх (мм)', Math.round(avgRadius * 10) / 10, (newR) => {
+      if (!(newR > 0)) return;
+      let changed = 0;
+      selectedArcs.forEach(arc => {
+        if (!setArcRadiusKeepEndpoints(arc, newR)) return;
+        updateLinkedDimensions(arc, 0, 0);
+        changed++;
+      });
+      if (changed > 0) {
+        saveSnapshot();
+        render();
+        showPropsPanel(null);
+      }
+    });
+
+    addPropButton(`${iconHtml('dimension',13)} Розмітити всі дуги`, () => {
+      selectedArcs.forEach(arc => autoAnnotateArc(arc));
+    }, '#094771', '#007acc');
+    return;
+  }
   propsPanel.style.display='block';
   propsBody.innerHTML='';
 
@@ -3223,14 +4422,73 @@ function showPropsPanel(ent) {
 
     addPropField('Довжина (мм)', Math.round(len * 100) / 100, (newLen) => {
       if (newLen <= 0) return;
-      const rad = Math.atan2(ent.y2 - ent.y1, ent.x2 - ent.x1);
+      const oldX1 = ent.x1, oldY1 = ent.y1;
       const oldX2 = ent.x2, oldY2 = ent.y2;
-      ent.x2 = ent.x1 + Math.cos(rad) * newLen;
-      ent.y2 = ent.y1 + Math.sin(rad) * newLen;
+      const dx = oldX2 - oldX1;
+      const dy = oldY2 - oldY1;
+      const curLen = Math.hypot(dx, dy);
+      if (curLen < 1e-9) return;
+
+      const ux = dx / curLen;
+      const uy = dy / curLen;
+      const startConnected = isEndpointConnected(ent.id, oldX1, oldY1);
+      const endConnected = isEndpointConnected(ent.id, oldX2, oldY2);
+
+      if (startConnected && endConnected) {
+        // Line is constrained from both sides: resize symmetrically from midpoint.
+        const midX = (oldX1 + oldX2) / 2;
+        const midY = (oldY1 + oldY2) / 2;
+        const half = newLen / 2;
+        ent.x1 = midX - ux * half;
+        ent.y1 = midY - uy * half;
+        ent.x2 = midX + ux * half;
+        ent.y2 = midY + uy * half;
+      } else if (endConnected && !startConnected) {
+        // Keep connected end fixed, move free start.
+        ent.x1 = oldX2 - ux * newLen;
+        ent.y1 = oldY2 - uy * newLen;
+        ent.x2 = oldX2;
+        ent.y2 = oldY2;
+      } else {
+        // Default and start-connected modes: keep start fixed, move end.
+        ent.x1 = oldX1;
+        ent.y1 = oldY1;
+        ent.x2 = oldX1 + ux * newLen;
+        ent.y2 = oldY1 + uy * newLen;
+      }
+
+      if (Math.hypot(ent.x1 - oldX1, ent.y1 - oldY1) > 1e-6) {
+        updateConnectedEndpoints(ent.id, 'start', oldX1, oldY1, ent.x1, ent.y1, new Set());
+      }
+      if (Math.hypot(ent.x2 - oldX2, ent.y2 - oldY2) > 1e-6) {
+        updateConnectedEndpoints(ent.id, 'end', oldX2, oldY2, ent.x2, ent.y2, new Set());
+      }
+
+      const weldIds = new Set([ent.id]);
+      state.connections.forEach(c => {
+        if (c.lineId === ent.id || c.targetId === ent.id) {
+          weldIds.add(c.lineId);
+          weldIds.add(c.targetId);
+        }
+      });
+      enforceConnectionConstraints(weldIds);
+
       const ddx = ent.x2 - oldX2, ddy = ent.y2 - oldY2;
       updateLinkedDimensions(ent, ddx, ddy);
       clearDimTextCacheForEntity(ent.id);
       saveSnapshot(); render(); showPropsPanel(ent);
+    });
+
+    addPropField('Проекція X (мм)', Math.round(Math.abs(dx) * 10) / 10, (newProjX) => {
+      if (!(newProjX >= 0)) return;
+      if (!applyLineProjection(ent, 'x', newProjX)) return;
+      showPropsPanel(ent);
+    });
+
+    addPropField('Проекція Y (мм)', Math.round(Math.abs(dy) * 10) / 10, (newProjY) => {
+      if (!(newProjY >= 0)) return;
+      if (!applyLineProjection(ent, 'y', newProjY)) return;
+      showPropsPanel(ent);
     });
 
     addPropField('Кут (°)', Math.round(angle * 10) / 10, (newAngle) => {
@@ -3336,12 +4594,111 @@ function showPropsPanel(ent) {
     addPropButton(`${iconHtml('dimension',13)} Додати розмір`, () => { autoAnnotate(ent); }, '#094771', '#007acc');
   } else if (ent.type==='arc') {
     propsTitle.textContent='Дуга';
+    const commitArcManualEdit = (extraRebuildIds, options = {}) => {
+      const { skipConnectionRebuild = false } = options;
+      clearDimTextCacheForEntity(ent.id);
+      if (!skipConnectionRebuild) {
+        const rebuildIds = new Set([ent.id]);
+        state.connections.forEach(c => {
+          if (c.lineId === ent.id || c.targetId === ent.id) {
+            rebuildIds.add(c.lineId);
+            rebuildIds.add(c.targetId);
+          }
+        });
+        if (extraRebuildIds && extraRebuildIds.size) {
+          extraRebuildIds.forEach(id => rebuildIds.add(id));
+        }
+        rebuildLineConnections(rebuildIds);
+        enforceConnectionConstraints(rebuildIds);
+      }
+      updateLinkedDimensions(ent, 0, 0);
+      saveSnapshot();
+      render();
+      showPropsPanel(ent);
+    };
+
+    const propagateManualEndpointMove = (epKey, oldX, oldY, newX, newY) => {
+      const relatedConns = state.connections.filter(
+        c => c.lineId === ent.id && c.endpoint === epKey
+      );
+      const weldIds = new Set([ent.id]);
+
+      relatedConns.forEach(conn => {
+        weldIds.add(conn.lineId);
+        weldIds.add(conn.targetId);
+
+        const target = state.entities.find(e => e.id === conn.targetId);
+        if (!target) return;
+        const targetPointKey = conn.targetPoint || conn.endpoint;
+        if (targetPointKey === 'body') return;
+
+        if (targetPointKey === 'start') {
+          const oldTx = target.x1;
+          const oldTy = target.y1;
+          if (target.type === 'arc') {
+            if (!setArcEndpointKeepRadius(target, 'start', newX, newY)) return;
+          } else {
+            target.x1 = newX;
+            target.y1 = newY;
+          }
+          updateConnectedEndpoints(target.id, 'start', oldX, oldY, newX, newY, new Set([ent.id]));
+          return;
+        }
+
+        if (targetPointKey === 'end') {
+          const oldTx = target.x2;
+          const oldTy = target.y2;
+          if (target.type === 'arc') {
+            if (!setArcEndpointKeepRadius(target, 'end', newX, newY)) return;
+          } else {
+            target.x2 = newX;
+            target.y2 = newY;
+          }
+          updateConnectedEndpoints(target.id, 'end', oldX, oldY, newX, newY, new Set([ent.id]));
+          return;
+        }
+
+        if (targetPointKey === 'mid') {
+          const midX = (target.x1 + target.x2) / 2;
+          const midY = (target.y1 + target.y2) / 2;
+          const mdx = newX - midX;
+          const mdy = newY - midY;
+          if (target.type === 'arc') {
+            target.x1 += mdx; target.y1 += mdy;
+            target.x2 += mdx; target.y2 += mdy;
+            target.cx += mdx; target.cy += mdy;
+            if (target.ctrl) { target.ctrl.x += mdx; target.ctrl.y += mdy; }
+          } else {
+            target.x1 += mdx; target.y1 += mdy;
+            target.x2 += mdx; target.y2 += mdy;
+          }
+          updateConnectedEndpoints(target.id, 'mid', oldX, oldY, newX, newY, new Set([ent.id]));
+        }
+      });
+
+      enforceConnectionConstraints(weldIds);
+      return weldIds;
+    };
+
+    const setArcEndpoint = (pointKey, nextX, nextY) => {
+      const oldX = pointKey === 'start' ? ent.x1 : ent.x2;
+      const oldY = pointKey === 'start' ? ent.y1 : ent.y2;
+      if (!setArcEndpointKeepRadius(ent, pointKey, nextX, nextY)) {
+        showStatus('Не вдалося змінити точку дуги без зміни радіуса');
+        return;
+      }
+      const weldIds = propagateManualEndpointMove(pointKey, oldX, oldY, nextX, nextY);
+      commitArcManualEdit(weldIds);
+    };
+
     if (ent.isLine || !isFinite(ent.r)) {
       // ALWAYS show chord length — even for degenerate (isLine) arcs
       const chord = Math.hypot(ent.x2 - ent.x1, ent.y2 - ent.y1);
 
       addPropField('Довжина хорди (мм)', Math.round(chord * 100) / 100, (newChord) => {
         if (newChord <= 0) return;
+        const oldX1 = ent.x1, oldY1 = ent.y1;
+        const oldX2 = ent.x2, oldY2 = ent.y2;
         const scale  = newChord / (chord || 1);
         const midX   = (ent.x1 + ent.x2) / 2;
         const midY   = (ent.y1 + ent.y2) / 2;
@@ -3368,14 +4725,24 @@ function showPropsPanel(ent) {
           ent.startAngle = d.startAngle; ent.endAngle = d.endAngle;
           ent.sweepFlag = d.sweepFlag; ent.isLine = false;
         }
-        clearDimTextCacheForEntity(ent.id);
-        saveSnapshot(); render(); showPropsPanel(ent);
+        const weldIds = new Set();
+        const movedStart = Math.hypot(ent.x1 - oldX1, ent.y1 - oldY1) > 1e-6;
+        const movedEnd = Math.hypot(ent.x2 - oldX2, ent.y2 - oldY2) > 1e-6;
+        if (movedStart) {
+          const ids = propagateManualEndpointMove('start', oldX1, oldY1, ent.x1, ent.y1);
+          if (ids) ids.forEach(id => weldIds.add(id));
+        }
+        if (movedEnd) {
+          const ids = propagateManualEndpointMove('end', oldX2, oldY2, ent.x2, ent.y2);
+          if (ids) ids.forEach(id => weldIds.add(id));
+        }
+        commitArcManualEdit(weldIds);
       });
 
-      addPropField('X1 (мм)', Math.round(ent.x1 * 10) / 10, v => { ent.x1 = v; saveSnapshot(); render(); showPropsPanel(ent); });
-      addPropField('Y1 (мм)', Math.round(ent.y1 * 10) / 10, v => { ent.y1 = v; saveSnapshot(); render(); showPropsPanel(ent); });
-      addPropField('X2 (мм)', Math.round(ent.x2 * 10) / 10, v => { ent.x2 = v; saveSnapshot(); render(); showPropsPanel(ent); });
-      addPropField('Y2 (мм)', Math.round(ent.y2 * 10) / 10, v => { ent.y2 = v; saveSnapshot(); render(); showPropsPanel(ent); });
+      addPropField('X1 (мм)', Math.round(ent.x1 * 10) / 10, v => { setArcEndpoint('start', v, ent.y1); });
+      addPropField('Y1 (мм)', Math.round(ent.y1 * 10) / 10, v => { setArcEndpoint('start', ent.x1, v); });
+      addPropField('X2 (мм)', Math.round(ent.x2 * 10) / 10, v => { setArcEndpoint('end', v, ent.y2); });
+      addPropField('Y2 (мм)', Math.round(ent.y2 * 10) / 10, v => { setArcEndpoint('end', ent.x2, v); });
       addPropSeparator();
       addPropButton(`${iconHtml('dimension',13)} Додати розмір`, () => { autoAnnotate(ent); }, '#094771', '#007acc');
     } else {
@@ -3386,57 +4753,66 @@ function showPropsPanel(ent) {
 
       addPropField('Радіус (мм)', Math.round((ent.r || 0) * 10) / 10, (newR) => {
         if (newR <= 0) return;
-        ent.r = newR;
-        // Recompute arc from endpoints and new radius
-        if (ent.ctrl) {
-          const midX = (ent.x1 + ent.x2) / 2;
-          const midY = (ent.y1 + ent.y2) / 2;
-          const ctrlDx = ent.ctrl.x - midX;
-          const ctrlDy = ent.ctrl.y - midY;
-          const ctrlDist = Math.hypot(ctrlDx, ctrlDy) || 1;
-          const halfChord = chord / 2;
-          if (newR >= halfChord) {
-            const arrow = newR - Math.sqrt(newR * newR - halfChord * halfChord);
-            ent.ctrl = {
-              x: midX + (ctrlDx / ctrlDist) * arrow,
-              y: midY + (ctrlDy / ctrlDist) * arrow,
-            };
-            const d = calcArcFromThreePoints({ x: ent.x1, y: ent.y1 }, ent.ctrl, { x: ent.x2, y: ent.y2 });
-            if (d && !d.isLine) {
-              ent.cx = d.cx; ent.cy = d.cy; ent.r = d.r;
-              ent.startAngle = d.startAngle; ent.endAngle = d.endAngle;
-            }
-          }
+        const ok = setArcRadiusKeepEndpoints(ent, newR);
+        if (!ok) {
+          showStatus('Не вдалося змінити радіус');
+          return;
         }
-        clearDimTextCacheForEntity(ent.id);
-        saveSnapshot(); render(); showPropsPanel(ent);
+        commitArcManualEdit(new Set([ent.id]));
       });
 
       addPropField('Довжина хорди (мм)', Math.round(chord * 10) / 10, (newChord) => {
         if (newChord <= 0) return;
-        const scale = newChord / (chord || 1);
-        const cx = (ent.x1 + ent.x2) / 2;
-        const cy = (ent.y1 + ent.y2) / 2;
-        ent.x1 = cx + (ent.x1 - cx) * scale;
-        ent.y1 = cy + (ent.y1 - cy) * scale;
-        ent.x2 = cx + (ent.x2 - cx) * scale;
-        ent.y2 = cy + (ent.y2 - cy) * scale;
-        if (ent.ctrl) {
-          ent.ctrl.x = cx + (ent.ctrl.x - cx) * scale;
-          ent.ctrl.y = cy + (ent.ctrl.y - cy) * scale;
+        const anchorKey = getArcEditAnchor(ent);
+        if (anchorKey) {
+          if (!setArcChordFromAnchor(ent, newChord, anchorKey)) {
+            showStatus('Не вдалося змінити хорду від вільного кінця');
+            return;
+          }
+          commitArcManualEdit(new Set([ent.id]));
+          return;
         }
-        const d = calcArcFromThreePoints({ x: ent.x1, y: ent.y1 }, ent.ctrl, { x: ent.x2, y: ent.y2 });
-        if (d && !d.isLine) {
-          ent.cx = d.cx; ent.cy = d.cy; ent.r = d.r;
-          ent.startAngle = d.startAngle; ent.endAngle = d.endAngle;
+        const oldX1 = ent.x1, oldY1 = ent.y1;
+        const oldX2 = ent.x2, oldY2 = ent.y2;
+        if (!setArcChordKeepRadius(ent, newChord)) {
+          showStatus('Не вдалося змінити довжину дуги без зміни радіуса');
+          return;
         }
-        saveSnapshot(); render(); showPropsPanel(ent);
+        const weldIds = new Set();
+        const movedStart = Math.hypot(ent.x1 - oldX1, ent.y1 - oldY1) > 1e-6;
+        const movedEnd = Math.hypot(ent.x2 - oldX2, ent.y2 - oldY2) > 1e-6;
+        if (movedStart) {
+          const ids = propagateManualEndpointMove('start', oldX1, oldY1, ent.x1, ent.y1);
+          if (ids) ids.forEach(id => weldIds.add(id));
+        }
+        if (movedEnd) {
+          const ids = propagateManualEndpointMove('end', oldX2, oldY2, ent.x2, ent.y2);
+          if (ids) ids.forEach(id => weldIds.add(id));
+        }
+        commitArcManualEdit(weldIds);
       });
 
-      addPropField('X1 (мм)', Math.round(ent.x1 * 10) / 10, v => { ent.x1 = v; saveSnapshot(); render(); showPropsPanel(ent); });
-      addPropField('Y1 (мм)', Math.round(ent.y1 * 10) / 10, v => { ent.y1 = v; saveSnapshot(); render(); showPropsPanel(ent); });
-      addPropField('X2 (мм)', Math.round(ent.x2 * 10) / 10, v => { ent.x2 = v; saveSnapshot(); render(); showPropsPanel(ent); });
-      addPropField('Y2 (мм)', Math.round(ent.y2 * 10) / 10, v => { ent.y2 = v; saveSnapshot(); render(); showPropsPanel(ent); });
+      addPropField('Проекція X (мм)', Math.round(Math.abs(ent.x2 - ent.x1) * 10) / 10, (newProjX) => {
+        if (!(newProjX >= 0)) return;
+        if (!applyArcProjection(ent, 'x', newProjX)) {
+          showStatus('Не вдалося змінити проекцію X дуги');
+          return;
+        }
+        showPropsPanel(ent);
+      });
+      addPropField('Проекція Y (мм)', Math.round(Math.abs(ent.y2 - ent.y1) * 10) / 10, (newProjY) => {
+        if (!(newProjY >= 0)) return;
+        if (!applyArcProjection(ent, 'y', newProjY)) {
+          showStatus('Не вдалося змінити проекцію Y дуги');
+          return;
+        }
+        showPropsPanel(ent);
+      });
+
+      addPropField('X1 (мм)', Math.round(ent.x1 * 10) / 10, v => { setArcEndpoint('start', v, ent.y1); });
+      addPropField('Y1 (мм)', Math.round(ent.y1 * 10) / 10, v => { setArcEndpoint('start', ent.x1, v); });
+      addPropField('X2 (мм)', Math.round(ent.x2 * 10) / 10, v => { setArcEndpoint('end', v, ent.y2); });
+      addPropField('Y2 (мм)', Math.round(ent.y2 * 10) / 10, v => { setArcEndpoint('end', ent.x2, v); });
 
       addPropSeparator();
       addPropReadonly('Початок', (ent.startAngle * 180/Math.PI).toFixed(1) + '°');
@@ -3464,9 +4840,41 @@ function showPropsPanel(ent) {
   } else if (ent.type==='dimension') {
     propsTitle.textContent='Розмір';
     const dimLen = Math.hypot(ent.x2 - ent.x1, ent.y2 - ent.y1);
+    const isRadial = ent.dimKind === 'radius' || ent.isRadius || ent.dimKind === 'diameter' || ent.isDiameter;
+    const numericValue = getDimensionNumericValue(ent);
 
     // Show computed value (read-only display)
     addPropReadonly('Виміряне значення: ' + getDimensionDisplayText(ent));
+
+    if (isFinite(numericValue) && numericValue > 0) {
+      addPropField('Значення (мм)', Math.round(numericValue * 10) / 10, (newValue) => {
+        if (!(newValue > 0)) return;
+        if (!applyDimensionNumericValue(ent, newValue)) {
+          showStatus('Не вдалося змінити значення розміру');
+          return;
+        }
+        showPropsPanel(ent);
+      });
+    }
+
+    if (!isRadial) {
+      addPropField('Проекція X (мм)', Math.round(Math.abs(ent.x2 - ent.x1) * 10) / 10, (newProjX) => {
+        if (!(newProjX >= 0)) return;
+        if (!setDimensionProjectionAlongAxis(ent, 'x', newProjX)) {
+          showStatus('Не вдалося змінити проекцію X');
+          return;
+        }
+        showPropsPanel(ent);
+      });
+      addPropField('Проекція Y (мм)', Math.round(Math.abs(ent.y2 - ent.y1) * 10) / 10, (newProjY) => {
+        if (!(newProjY >= 0)) return;
+        if (!setDimensionProjectionAlongAxis(ent, 'y', newProjY)) {
+          showStatus('Не вдалося змінити проекцію Y');
+          return;
+        }
+        showPropsPanel(ent);
+      });
+    }
 
     // Editable custom label (overrides computed value)
     addPropField('Мітка (текст)', ent.text || '', (val) => {
@@ -3581,7 +4989,12 @@ function addPropField(label, value, onChange) {
       if (!isNaN(parsed)) { onChange(parsed); render(); }
     } else if (e.key === 'Enter') {
       const v = parseFloat(inp.value);
-      if (!isNaN(v)) { onChange(v); clearDimTextCacheForEntity(ent.id); saveSnapshot(); render(); }
+      if (!isNaN(v)) {
+        onChange(v);
+        if (state.selectedId !== null) clearDimTextCacheForEntity(state.selectedId);
+        saveSnapshot();
+        render();
+      }
       inp.blur();
     } else if (e.key === 'Escape') {
       inp.value = initial;
@@ -3594,7 +5007,7 @@ function addPropField(label, value, onChange) {
     const v = parseFloat(inp.value);
     if (!isNaN(v)) {
       onChange(v);
-      clearDimTextCacheForEntity(ent.id);
+      if (state.selectedId !== null) clearDimTextCacheForEntity(state.selectedId);
       saveSnapshot(); render();
       const e2 = state.entities.find(x => x.id === state.selectedId);
       if (e2) showPropsPanel(e2);
@@ -3753,6 +5166,871 @@ function addPropRange(label, value, min, max, step, onInput, onEnd) {
   row.appendChild(topRow);
   row.appendChild(slider);
   propsBody.appendChild(row);
+}
+
+function getDimensionNumericValue(ent) {
+  if (!ent || ent.type !== 'dimension') return NaN;
+
+  if (ent.dimKind === 'radius' || ent.isRadius) {
+    const arc = ent.anchoredTo && ent.anchoredTo.length > 0
+      ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
+      : null;
+    const r = arc && isFinite(arc.r) ? arc.r : ent.arcRadius;
+    return isFinite(r) ? r : NaN;
+  }
+
+  if (ent.dimKind === 'diameter' || ent.isDiameter) {
+    const target = ent.anchoredTo && ent.anchoredTo.length > 0
+      ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
+      : null;
+    const r = target && isFinite(target.r) ? target.r : ent.arcRadius;
+    return isFinite(r) ? r * 2 : NaN;
+  }
+
+  const dx = Math.abs(ent.x2 - ent.x1);
+  const dy = Math.abs(ent.y2 - ent.y1);
+  return ent.dimType === 'aligned' ? Math.hypot(dx, dy) : (dx >= dy ? dx : dy);
+}
+
+function applyDimensionNumericValue(ent, newValue) {
+  if (!ent || ent.type !== 'dimension' || !(newValue > 0)) return false;
+
+  if (ent.dimKind === 'radius' || ent.isRadius) {
+    const target = ent.anchoredTo && ent.anchoredTo.length > 0
+      ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
+      : null;
+    if (!target) return false;
+    if (target.type === 'arc') {
+      if (!setArcRadiusKeepEndpoints(target, newValue)) return false;
+      updateLinkedDimensions(target, 0, 0);
+      clearDimTextCacheForEntity(target.id);
+      ent.text = '';
+      saveSnapshot();
+      render();
+      return true;
+    }
+    if (target.type === 'circle') {
+      target.r = newValue;
+      clearDimTextCacheForEntity(target.id);
+      ent.text = '';
+      saveSnapshot();
+      render();
+      return true;
+    }
+    return false;
+  }
+
+  if (ent.dimKind === 'diameter' || ent.isDiameter) {
+    const target = ent.anchoredTo && ent.anchoredTo.length > 0
+      ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
+      : null;
+    if (!target || !isFinite(newValue)) return false;
+    const nextR = newValue / 2;
+    if (!(nextR > 0)) return false;
+    if (target.type === 'circle') {
+      target.r = nextR;
+      clearDimTextCacheForEntity(target.id);
+      ent.text = '';
+      saveSnapshot();
+      render();
+      return true;
+    }
+    if (target.type === 'arc') {
+      if (!setArcRadiusKeepEndpoints(target, nextR)) return false;
+      updateLinkedDimensions(target, 0, 0);
+      clearDimTextCacheForEntity(target.id);
+      ent.text = '';
+      saveSnapshot();
+      render();
+      return true;
+    }
+    return false;
+  }
+
+  applyDimensionResize(ent, newValue);
+  ent.text = '';
+  saveSnapshot();
+  render();
+  return true;
+}
+
+function normalizeDimensionSideForAxis(axis, side) {
+  if (!side) return null;
+  if (axis === 'x') {
+    if (side === 'top' || side === 'left') return 'top';
+    if (side === 'bottom' || side === 'right') return 'bottom';
+    return null;
+  }
+  if (side === 'left' || side === 'top') return 'left';
+  if (side === 'right' || side === 'bottom') return 'right';
+  return null;
+}
+
+function applyDimensionSide(ent, axis, side) {
+  if (!ent || ent.type !== 'dimension') return false;
+  const normalized = normalizeDimensionSideForAxis(axis, side);
+  if (!normalized) return false;
+  const baseOffset = Math.max(Math.abs(ent.offset || 0), AUTO_ANNOTATE.offsetDefault);
+  ent.offset = (normalized === 'top' || normalized === 'left') ? -baseOffset : baseOffset;
+  return true;
+}
+
+function setDimensionProjectionAlongAxis(ent, axis, newProjection, side) {
+  if (!ent || ent.type !== 'dimension' || !(newProjection >= 0)) return false;
+  if (ent.dimKind === 'radius' || ent.isRadius || ent.dimKind === 'diameter' || ent.isDiameter) {
+    return false;
+  }
+
+  const target = Math.abs(newProjection);
+  const old = { x1: ent.x1, y1: ent.y1, x2: ent.x2, y2: ent.y2 };
+  if (axis === 'x') {
+    const sign = (ent.x2 - ent.x1) >= 0 ? 1 : -1;
+    const cx = (old.x1 + old.x2) / 2;
+    ent.x1 = cx - sign * target / 2;
+    ent.x2 = cx + sign * target / 2;
+  } else {
+    const sign = (ent.y2 - ent.y1) >= 0 ? 1 : -1;
+    const cy = (old.y1 + old.y2) / 2;
+    ent.y1 = cy - sign * target / 2;
+    ent.y2 = cy + sign * target / 2;
+  }
+
+  const dStartX = ent.x1 - old.x1;
+  const dStartY = ent.y1 - old.y1;
+  const dEndX = ent.x2 - old.x2;
+  const dEndY = ent.y2 - old.y2;
+  if (Math.hypot(dStartX, dStartY) > 1e-9) {
+    stretchAnchoredEntity(old.x1, old.y1, dStartX, dStartY);
+  }
+  if (Math.hypot(dEndX, dEndY) > 1e-9) {
+    stretchAnchoredEntity(old.x2, old.y2, dEndX, dEndY);
+  }
+
+  if (side) applyDimensionSide(ent, axis, side);
+  ent.text = '';
+  saveSnapshot();
+  render();
+  return true;
+}
+
+function resolveLineDirectionMode(mode) {
+  if (mode === 'aFixed') return 'startFixed';
+  if (mode === 'bFixed') return 'endFixed';
+  if (mode === 'center') return 'center';
+  return mode || 'startFixed';
+}
+
+function applyLineLength(ent, newLength, mode) {
+  if (!ent || ent.type !== 'line' || !(newLength > 0)) return false;
+  const oldX1 = ent.x1, oldY1 = ent.y1;
+  const oldX2 = ent.x2, oldY2 = ent.y2;
+  const dx = oldX2 - oldX1;
+  const dy = oldY2 - oldY1;
+  const curLen = Math.hypot(dx, dy);
+  if (curLen < 1e-9) return false;
+
+  const ux = dx / curLen;
+  const uy = dy / curLen;
+  const resolvedMode = resolveLineDirectionMode(mode);
+
+  if (resolvedMode === 'endFixed') {
+    ent.x2 = oldX2;
+    ent.y2 = oldY2;
+    ent.x1 = oldX2 - ux * newLength;
+    ent.y1 = oldY2 - uy * newLength;
+  } else if (resolvedMode === 'center') {
+    const cx = (oldX1 + oldX2) / 2;
+    const cy = (oldY1 + oldY2) / 2;
+    const half = newLength / 2;
+    ent.x1 = cx - ux * half;
+    ent.y1 = cy - uy * half;
+    ent.x2 = cx + ux * half;
+    ent.y2 = cy + uy * half;
+  } else {
+    ent.x1 = oldX1;
+    ent.y1 = oldY1;
+    ent.x2 = oldX1 + ux * newLength;
+    ent.y2 = oldY1 + uy * newLength;
+  }
+
+  if (Math.hypot(ent.x1 - oldX1, ent.y1 - oldY1) > 1e-9) {
+    updateConnectedEndpoints(ent.id, 'start', oldX1, oldY1, ent.x1, ent.y1, new Set());
+  }
+  if (Math.hypot(ent.x2 - oldX2, ent.y2 - oldY2) > 1e-9) {
+    updateConnectedEndpoints(ent.id, 'end', oldX2, oldY2, ent.x2, ent.y2, new Set());
+  }
+
+  updateLinkedDimensions(ent, ent.x2 - oldX2, ent.y2 - oldY2);
+  clearDimTextCacheForEntity(ent.id);
+  saveSnapshot();
+  render();
+  return true;
+}
+
+function applyLineProjection(ent, axis, newProjection, mode) {
+  if (!ent || ent.type !== 'line' || !(newProjection >= 0)) return false;
+  const target = Math.abs(newProjection);
+  const oldX1 = ent.x1, oldY1 = ent.y1;
+  const oldX2 = ent.x2, oldY2 = ent.y2;
+  const startConnected = isEndpointConnected(ent.id, oldX1, oldY1);
+  const endConnected = isEndpointConnected(ent.id, oldX2, oldY2);
+  const resolvedMode = mode && mode !== 'auto'
+    ? resolveLineDirectionMode(mode)
+    : 'auto';
+
+  if (axis === 'x') {
+    const sign = (oldX2 - oldX1) >= 0 ? 1 : -1;
+    if (resolvedMode === 'center') {
+      const cx = (oldX1 + oldX2) / 2;
+      ent.x1 = cx - sign * target / 2;
+      ent.x2 = cx + sign * target / 2;
+    } else if (resolvedMode === 'endFixed') {
+      ent.x1 = oldX2 - sign * target;
+      ent.x2 = oldX2;
+    } else if (resolvedMode === 'startFixed') {
+      ent.x1 = oldX1;
+      ent.x2 = oldX1 + sign * target;
+    } else if (startConnected && endConnected) {
+      const cx = (oldX1 + oldX2) / 2;
+      ent.x1 = cx - sign * target / 2;
+      ent.x2 = cx + sign * target / 2;
+    } else if (endConnected && !startConnected) {
+      ent.x1 = oldX2 - sign * target;
+      ent.x2 = oldX2;
+    } else {
+      ent.x1 = oldX1;
+      ent.x2 = oldX1 + sign * target;
+    }
+  } else {
+    const sign = (oldY2 - oldY1) >= 0 ? 1 : -1;
+    if (resolvedMode === 'center') {
+      const cy = (oldY1 + oldY2) / 2;
+      ent.y1 = cy - sign * target / 2;
+      ent.y2 = cy + sign * target / 2;
+    } else if (resolvedMode === 'endFixed') {
+      ent.y1 = oldY2 - sign * target;
+      ent.y2 = oldY2;
+    } else if (resolvedMode === 'startFixed') {
+      ent.y1 = oldY1;
+      ent.y2 = oldY1 + sign * target;
+    } else if (startConnected && endConnected) {
+      const cy = (oldY1 + oldY2) / 2;
+      ent.y1 = cy - sign * target / 2;
+      ent.y2 = cy + sign * target / 2;
+    } else if (endConnected && !startConnected) {
+      ent.y1 = oldY2 - sign * target;
+      ent.y2 = oldY2;
+    } else {
+      ent.y1 = oldY1;
+      ent.y2 = oldY1 + sign * target;
+    }
+  }
+
+  if (Math.hypot(ent.x1 - oldX1, ent.y1 - oldY1) > 1e-9) {
+    updateConnectedEndpoints(ent.id, 'start', oldX1, oldY1, ent.x1, ent.y1, new Set());
+  }
+  if (Math.hypot(ent.x2 - oldX2, ent.y2 - oldY2) > 1e-9) {
+    updateConnectedEndpoints(ent.id, 'end', oldX2, oldY2, ent.x2, ent.y2, new Set());
+  }
+
+  const weldIds = new Set([ent.id]);
+  state.connections.forEach(c => {
+    if (c.lineId === ent.id || c.targetId === ent.id) {
+      weldIds.add(c.lineId);
+      weldIds.add(c.targetId);
+    }
+  });
+  enforceConnectionConstraints(weldIds);
+  updateLinkedDimensions(ent, ent.x2 - oldX2, ent.y2 - oldY2);
+  clearDimTextCacheForEntity(ent.id);
+  saveSnapshot();
+  render();
+  return true;
+}
+
+function resolveArcDirectionMode(mode) {
+  if (mode === 'aFixed') return 'startFixed';
+  if (mode === 'bFixed') return 'endFixed';
+  return mode || 'auto';
+}
+
+function applyArcProjection(ent, axis, newProjection, mode) {
+  if (!ent || ent.type !== 'arc' || ent.isLine || !isFinite(ent.r) || !(newProjection >= 0)) return false;
+  const target = Math.abs(newProjection);
+  const editAnchor = getArcEditAnchor(ent);
+  const resolvedMode = resolveArcDirectionMode(mode);
+  const moveEnd = resolvedMode === 'startFixed'
+    ? 'end'
+    : resolvedMode === 'endFixed'
+      ? 'start'
+      : (editAnchor === 'start' ? 'end' : (editAnchor === 'end' ? 'start' : 'end'));
+  const old = { x1: ent.x1, y1: ent.y1, x2: ent.x2, y2: ent.y2 };
+
+  let ok = false;
+  if (moveEnd === 'end') {
+    const sign = (old.x2 - old.x1) >= 0 ? 1 : -1;
+    const signY = (old.y2 - old.y1) >= 0 ? 1 : -1;
+    const nextX = axis === 'x' ? old.x1 + sign * target : old.x2;
+    const nextY = axis === 'y' ? old.y1 + signY * target : old.y2;
+    ok = setArcEndpointKeepRadius(ent, 'end', nextX, nextY);
+  } else {
+    const sign = (old.x2 - old.x1) >= 0 ? 1 : -1;
+    const signY = (old.y2 - old.y1) >= 0 ? 1 : -1;
+    const nextX = axis === 'x' ? old.x2 - sign * target : old.x1;
+    const nextY = axis === 'y' ? old.y2 - signY * target : old.y1;
+    ok = setArcEndpointKeepRadius(ent, 'start', nextX, nextY);
+  }
+  if (!ok) return false;
+
+  if (Math.hypot(ent.x1 - old.x1, ent.y1 - old.y1) > 1e-9) {
+    updateConnectedEndpoints(ent.id, 'start', old.x1, old.y1, ent.x1, ent.y1, new Set());
+  }
+  if (Math.hypot(ent.x2 - old.x2, ent.y2 - old.y2) > 1e-9) {
+    updateConnectedEndpoints(ent.id, 'end', old.x2, old.y2, ent.x2, ent.y2, new Set());
+  }
+
+  const rebuildIds = new Set([ent.id]);
+  state.connections.forEach(c => {
+    if (c.lineId === ent.id || c.targetId === ent.id) {
+      rebuildIds.add(c.lineId);
+      rebuildIds.add(c.targetId);
+    }
+  });
+  rebuildLineConnections(rebuildIds);
+  enforceConnectionConstraints(rebuildIds);
+  updateLinkedDimensions(ent, 0, 0);
+  clearDimTextCacheForEntity(ent.id);
+  saveSnapshot();
+  render();
+  return true;
+}
+
+function getQuickMetricMeta(metric) {
+  const map = {
+    length: { label: 'Довжина', accent: '#4ea1ff' },
+    width: { label: 'По ширині', accent: '#5fd08f' },
+    height: { label: 'По висоті', accent: '#f2b84b' },
+    radius: { label: 'Радіус', accent: '#ff7f6e' },
+    diameter: { label: 'Діаметр', accent: '#c084fc' },
+    size: { label: 'Розмір', accent: '#9aa4b2' },
+  };
+  return map[metric] || map.size;
+}
+
+function quickEditorValueText(value) {
+  return String(Math.round(value * 10) / 10);
+}
+
+function parseQuickEditorNumber(raw) {
+  const normalized = String(raw || '').replace(',', '.').trim();
+  const value = parseFloat(normalized);
+  return isFinite(value) ? value : NaN;
+}
+
+function clearQuickEditorHighlight() {
+  if (!previewLayer) return;
+  previewLayer.querySelectorAll('.quick-editor-highlight').forEach(el => el.remove());
+}
+
+function markQuickHighlight(el) {
+  if (!el) return;
+  el.classList.add('quick-editor-highlight');
+  el.setAttribute('pointer-events', 'none');
+  previewLayer.appendChild(el);
+}
+
+function markQuickPointLabel(worldX, worldY, text, color) {
+  const p = worldToSVG(worldX, worldY);
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  bg.setAttribute('cx', p.x.toFixed(2));
+  bg.setAttribute('cy', p.y.toFixed(2));
+  bg.setAttribute('r', '9');
+  bg.setAttribute('fill', color || '#4ea1ff');
+  bg.setAttribute('stroke', '#ffffff');
+  bg.setAttribute('stroke-width', '1.5');
+  bg.setAttribute('vector-effect', 'non-scaling-stroke');
+  const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  label.setAttribute('x', p.x.toFixed(2));
+  label.setAttribute('y', (p.y + 4).toFixed(2));
+  label.setAttribute('fill', '#ffffff');
+  label.setAttribute('font-size', '10');
+  label.setAttribute('font-weight', '800');
+  label.setAttribute('text-anchor', 'middle');
+  label.setAttribute('vector-effect', 'non-scaling-stroke');
+  label.textContent = text;
+  g.appendChild(bg);
+  g.appendChild(label);
+  markQuickHighlight(g);
+}
+
+function drawQuickEditorHighlight(item) {
+  clearQuickEditorHighlight();
+  if (!previewLayer || !item) return;
+
+  const ent = item.entityId
+    ? state.entities.find(e => e.id === item.entityId)
+    : item.entity;
+  if (!ent) return;
+
+  const color = item.accent || '#4ea1ff';
+  const width = item.metric === 'radius' || item.metric === 'diameter' ? '4' : '3.5';
+
+  if (ent.type === 'line' || ent.type === 'centerline') {
+    const p1 = worldToSVG(ent.x1, ent.y1);
+    const p2 = worldToSVG(ent.x2, ent.y2);
+    markQuickHighlight(makeSVGLine(p1.x, p1.y, p2.x, p2.y, color, width, ''));
+
+    if (item.metric === 'width' || item.metric === 'height') {
+      const a = item.metric === 'width'
+        ? worldToSVG(ent.x1, ent.y2)
+        : worldToSVG(ent.x2, ent.y1);
+      markQuickHighlight(makeSVGLine(p1.x, p1.y, a.x, a.y, color, '2', '6,4'));
+      markQuickHighlight(makeSVGLine(a.x, a.y, p2.x, p2.y, color, '2', '6,4'));
+    }
+    if (item.directionOptions) {
+      markQuickPointLabel(ent.x1, ent.y1, 'A', '#1467d2');
+      markQuickPointLabel(ent.x2, ent.y2, 'B', '#d24b14');
+    }
+    return;
+  }
+
+  if (ent.type === 'arc') {
+    markQuickHighlight(makeArcSVGPath(ent, color, width, ''));
+    if ((item.metric === 'radius' || item.metric === 'diameter') && isFinite(ent.r)) {
+      const tipAngle = ent.ctrl
+        ? Math.atan2(ent.ctrl.y - ent.cy, ent.ctrl.x - ent.cx)
+        : Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
+      const center = worldToSVG(ent.cx, ent.cy);
+      const tip = worldToSVG(ent.cx + ent.r * Math.cos(tipAngle), ent.cy + ent.r * Math.sin(tipAngle));
+      markQuickHighlight(makeSVGLine(center.x, center.y, tip.x, tip.y, color, '2.5', '5,4'));
+    }
+    if (item.directionOptions) {
+      markQuickPointLabel(ent.x1, ent.y1, 'A', '#1467d2');
+      markQuickPointLabel(ent.x2, ent.y2, 'B', '#d24b14');
+    }
+    return;
+  }
+
+  if (ent.type === 'circle') {
+    const c = worldToSVG(ent.cx, ent.cy);
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', c.x.toFixed(2));
+    circle.setAttribute('cy', c.y.toFixed(2));
+    circle.setAttribute('r', (ent.r * effectiveZoom()).toFixed(2));
+    circle.setAttribute('fill', 'none');
+    circle.setAttribute('stroke', color);
+    circle.setAttribute('stroke-width', width);
+    circle.setAttribute('vector-effect', 'non-scaling-stroke');
+    markQuickHighlight(circle);
+    const rTip = worldToSVG(ent.cx + ent.r, ent.cy);
+    markQuickHighlight(makeSVGLine(c.x, c.y, rTip.x, rTip.y, color, '2.5', '5,4'));
+    return;
+  }
+
+  if (ent.type === 'dimension') {
+    const p1 = worldToSVG(ent.x1, ent.y1);
+    const p2 = worldToSVG(ent.x2, ent.y2);
+    markQuickHighlight(makeSVGLine(p1.x, p1.y, p2.x, p2.y, color, width, ''));
+  }
+}
+
+function getDefaultLineDirection(ent) {
+  const startConnected = isEndpointConnected(ent.id, ent.x1, ent.y1);
+  const endConnected = isEndpointConnected(ent.id, ent.x2, ent.y2);
+  if (startConnected && !endConnected) return 'aFixed';
+  if (endConnected && !startConnected) return 'bFixed';
+  return 'aFixed';
+}
+
+function getDefaultArcDirection(ent) {
+  const editAnchor = getArcEditAnchor(ent);
+  if (editAnchor === 'start') return 'aFixed';
+  if (editAnchor === 'end') return 'bFixed';
+  return 'aFixed';
+}
+
+function buildQuickEditorGroups() {
+  const groups = [];
+  const counts = { line: 0, arc: 0, circle: 0, dimension: 0 };
+  const editableEntityIds = new Set();
+
+  const addGroup = (key, title, subtitle, items, options = {}) => {
+    if (!items || items.length === 0) return;
+    items.forEach(item => {
+      const meta = getQuickMetricMeta(item.metric);
+      item.label = meta.label;
+      item.accent = meta.accent;
+    });
+    groups.push({ key, title, subtitle, items, deleteEntityId: options.deleteEntityId || null });
+  };
+
+  state.entities.forEach(ent => {
+    if (ent.type === 'line' || ent.type === 'centerline') {
+      counts.line += 1;
+      editableEntityIds.add(ent.id);
+      const len = Math.hypot(ent.x2 - ent.x1, ent.y2 - ent.y1);
+      const lineDirection = getDefaultLineDirection(ent);
+      addGroup(`line-${ent.id}`, `Лінія ${counts.line}`, 'пряма деталь', [
+        {
+          key: `line-len-${ent.id}`,
+          metric: 'length',
+          value: len,
+          entityId: ent.id,
+          defaultDirection: lineDirection,
+          directionOptions: [
+            { value: 'aFixed', label: 'Точка A' },
+            { value: 'bFixed', label: 'Точка B' },
+            { value: 'center', label: 'Центр' },
+          ],
+          apply: (next, direction) => applyLineLength(ent, next, direction),
+        },
+        {
+          key: `line-projx-${ent.id}`,
+          metric: 'width',
+          value: Math.abs(ent.x2 - ent.x1),
+          entityId: ent.id,
+          defaultDirection: lineDirection,
+          directionOptions: [
+            { value: 'aFixed', label: 'Точка A' },
+            { value: 'bFixed', label: 'Точка B' },
+            { value: 'center', label: 'Центр' },
+          ],
+          apply: (next, direction) => applyLineProjection(ent, 'x', next, direction),
+        },
+        {
+          key: `line-projy-${ent.id}`,
+          metric: 'height',
+          value: Math.abs(ent.y2 - ent.y1),
+          entityId: ent.id,
+          defaultDirection: lineDirection,
+          directionOptions: [
+            { value: 'aFixed', label: 'Точка A' },
+            { value: 'bFixed', label: 'Точка B' },
+            { value: 'center', label: 'Центр' },
+          ],
+          apply: (next, direction) => applyLineProjection(ent, 'y', next, direction),
+        },
+      ], { deleteEntityId: ent.id });
+      return;
+    }
+
+    if (ent.type === 'arc' && !ent.isLine && isFinite(ent.r) && ent.r > 0) {
+      counts.arc += 1;
+      editableEntityIds.add(ent.id);
+      const arcDirection = getDefaultArcDirection(ent);
+      addGroup(`arc-${ent.id}`, `Дуга ${counts.arc}`, 'заокруглення', [
+        {
+          key: `arc-r-${ent.id}`,
+          metric: 'radius',
+          value: ent.r,
+          entityId: ent.id,
+          apply: (next) => {
+            if (!(next > 0)) return false;
+            if (!setArcRadiusKeepEndpoints(ent, next)) return false;
+            updateLinkedDimensions(ent, 0, 0);
+            clearDimTextCacheForEntity(ent.id);
+            saveSnapshot();
+            render();
+            return true;
+          },
+        },
+        {
+          key: `arc-projx-${ent.id}`,
+          metric: 'width',
+          value: Math.abs(ent.x2 - ent.x1),
+          entityId: ent.id,
+          defaultDirection: arcDirection,
+          directionOptions: [
+            { value: 'aFixed', label: 'Точка A' },
+            { value: 'bFixed', label: 'Точка B' },
+          ],
+          apply: (next, direction) => applyArcProjection(ent, 'x', next, direction),
+        },
+        {
+          key: `arc-projy-${ent.id}`,
+          metric: 'height',
+          value: Math.abs(ent.y2 - ent.y1),
+          entityId: ent.id,
+          defaultDirection: arcDirection,
+          directionOptions: [
+            { value: 'aFixed', label: 'Точка A' },
+            { value: 'bFixed', label: 'Точка B' },
+          ],
+          apply: (next, direction) => applyArcProjection(ent, 'y', next, direction),
+        },
+      ], { deleteEntityId: ent.id });
+      return;
+    }
+
+    if (ent.type === 'circle' && isFinite(ent.r) && ent.r > 0) {
+      counts.circle += 1;
+      editableEntityIds.add(ent.id);
+      addGroup(`circle-${ent.id}`, `Коло ${counts.circle}`, 'кругла деталь', [
+        {
+          key: `circle-r-${ent.id}`,
+          metric: 'radius',
+          value: ent.r,
+          entityId: ent.id,
+          apply: (next) => {
+            if (!(next > 0)) return false;
+            ent.r = next;
+            clearDimTextCacheForEntity(ent.id);
+            saveSnapshot();
+            render();
+            return true;
+          },
+        },
+        {
+          key: `circle-d-${ent.id}`,
+          metric: 'diameter',
+          value: ent.r * 2,
+          entityId: ent.id,
+          apply: (next) => {
+            if (!(next > 0)) return false;
+            ent.r = next / 2;
+            clearDimTextCacheForEntity(ent.id);
+            saveSnapshot();
+            render();
+            return true;
+          },
+        },
+      ], { deleteEntityId: ent.id });
+    }
+  });
+
+  state.entities.forEach(ent => {
+    if (ent.type !== 'dimension') return;
+    const anchorId = Array.isArray(ent.anchoredTo) && ent.anchoredTo[0] ? ent.anchoredTo[0].entityId : null;
+    if (anchorId && editableEntityIds.has(anchorId)) return;
+
+    const value = getDimensionNumericValue(ent);
+    if (!isFinite(value) || !(value > 0)) return;
+    counts.dimension += 1;
+
+    const metric = ent.dimKind === 'radius' || ent.isRadius
+      ? 'radius'
+      : ent.dimKind === 'diameter' || ent.isDiameter
+        ? 'diameter'
+        : 'size';
+
+    const dimItems = [
+      {
+        key: `dim-${ent.id}`,
+        metric,
+        value,
+        entityId: ent.id,
+        apply: (next) => applyDimensionNumericValue(ent, next),
+      },
+    ];
+    if (metric === 'size') {
+      dimItems.push({
+        key: `dim-projx-${ent.id}`,
+        metric: 'width',
+        value: Math.abs(ent.x2 - ent.x1),
+        entityId: ent.id,
+        directionOptions: [
+          { value: 'top', label: 'Зверху' },
+          { value: 'bottom', label: 'Знизу' },
+          { value: 'left', label: 'Зліва' },
+          { value: 'right', label: 'Справа' },
+        ],
+        defaultDirection: (ent.offset || 0) < 0 ? 'top' : 'bottom',
+        apply: (next, side) => setDimensionProjectionAlongAxis(ent, 'x', next, side),
+      });
+      dimItems.push({
+        key: `dim-projy-${ent.id}`,
+        metric: 'height',
+        value: Math.abs(ent.y2 - ent.y1),
+        entityId: ent.id,
+        directionOptions: [
+          { value: 'left', label: 'Зліва' },
+          { value: 'right', label: 'Справа' },
+          { value: 'top', label: 'Зверху' },
+          { value: 'bottom', label: 'Знизу' },
+        ],
+        defaultDirection: (ent.offset || 0) < 0 ? 'left' : 'right',
+        apply: (next, side) => setDimensionProjectionAlongAxis(ent, 'y', next, side),
+      });
+    }
+    addGroup(`dimension-${ent.id}`, `Розмітка ${counts.dimension}`, 'окремий напис на кресленні', dimItems, { deleteEntityId: ent.id });
+  });
+
+  return groups;
+}
+
+function refreshQuickEditorPanel() {
+  if (!quickEditorList || !quickEditorPanel) return;
+  if (!state.quickEditorMode) {
+    quickEditorList.innerHTML = '';
+    return;
+  }
+
+  const groups = buildQuickEditorGroups();
+  quickEditorList.innerHTML = '';
+
+  if (groups.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'qe-empty';
+    empty.textContent = 'Тут поки немає довжин, радіусів або розміток для швидкої зміни.';
+    quickEditorList.appendChild(empty);
+    return;
+  }
+
+  groups.forEach(group => {
+    const groupHead = document.createElement('div');
+    groupHead.className = 'qe-group-head';
+    const groupTitle = document.createElement('div');
+    groupTitle.className = 'qe-group-title';
+    groupTitle.textContent = group.subtitle
+      ? `${group.title} · ${group.subtitle}`
+      : group.title;
+    groupHead.appendChild(groupTitle);
+    if (group.deleteEntityId) {
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.className = 'qe-delete-btn';
+      deleteBtn.textContent = 'Видалити';
+      deleteBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const idSet = new Set([group.deleteEntityId]);
+        saveSnapshot();
+        const deletedCount = deleteEntitiesWithLinkedDimensions(idSet);
+        if (state.selectedId === group.deleteEntityId) state.selectedId = null;
+        state.selectedIds.delete(group.deleteEntityId);
+        clearQuickEditorHighlight();
+        render();
+        refreshQuickEditorPanel();
+        showStatus(`Видалено: ${deletedCount} елемент(ів)`);
+      });
+      groupHead.appendChild(deleteBtn);
+    }
+    quickEditorList.appendChild(groupHead);
+
+    group.items.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'qe-item';
+      row.style.setProperty('--qe-accent', item.accent || '#4ea1ff');
+
+      const label = document.createElement('div');
+      label.className = 'qe-item-label';
+      label.textContent = item.label;
+
+      const controls = document.createElement('div');
+      controls.className = 'qe-controls';
+
+      let dirSelect = null;
+      if (Array.isArray(item.directionOptions) && item.directionOptions.length > 0) {
+        dirSelect = document.createElement('select');
+        dirSelect.className = 'qe-dir-select';
+        const selectedDirection = (state.quickEditorDirection && state.quickEditorDirection[item.key])
+          || item.defaultDirection
+          || item.directionOptions[0].value;
+        item.directionOptions.forEach(opt => {
+          const option = document.createElement('option');
+          option.value = opt.value;
+          option.textContent = opt.label;
+          if (opt.value === selectedDirection) option.selected = true;
+          dirSelect.appendChild(option);
+        });
+        dirSelect.addEventListener('change', () => {
+          if (!state.quickEditorDirection) state.quickEditorDirection = {};
+          state.quickEditorDirection[item.key] = dirSelect.value;
+        });
+        controls.appendChild(dirSelect);
+      }
+
+      const inputWrap = document.createElement('div');
+      inputWrap.className = 'qe-input-wrap';
+
+      const input = document.createElement('input');
+      input.className = 'qe-item-input';
+      input.type = 'number';
+      input.inputMode = 'decimal';
+      input.step = '0.1';
+      input.min = '0';
+      input.value = quickEditorValueText(item.value);
+
+      const unit = document.createElement('span');
+      unit.className = 'qe-unit';
+      unit.textContent = 'мм';
+
+      const commit = () => {
+        const next = parseQuickEditorNumber(input.value);
+        if (!isFinite(next)) {
+          input.value = quickEditorValueText(item.value);
+          return;
+        }
+        const direction = dirSelect ? dirSelect.value : undefined;
+        const ok = item.apply(next, direction);
+        if (!ok) {
+          input.style.borderColor = '#cc4444';
+          return;
+        }
+        input.style.borderColor = '#404347';
+        item.value = next;
+        input.value = quickEditorValueText(next);
+        showStatus(`Оновлено: ${group.title} — ${item.label}`);
+      };
+
+      row.addEventListener('mouseenter', () => drawQuickEditorHighlight(item));
+      row.addEventListener('mouseleave', () => {
+        if (document.activeElement !== input) clearQuickEditorHighlight();
+      });
+      row.addEventListener('click', () => drawQuickEditorHighlight(item));
+      input.addEventListener('focus', () => drawQuickEditorHighlight(item));
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          commit();
+        } else if (e.key === 'Escape') {
+          input.value = quickEditorValueText(item.value);
+          input.blur();
+          clearQuickEditorHighlight();
+        }
+        e.stopPropagation();
+      });
+      input.addEventListener('blur', () => {
+        commit();
+        clearQuickEditorHighlight();
+      });
+
+      inputWrap.appendChild(input);
+      inputWrap.appendChild(unit);
+      controls.appendChild(inputWrap);
+      row.appendChild(label);
+      row.appendChild(controls);
+      quickEditorList.appendChild(row);
+    });
+  });
+}
+
+function setQuickEditorMode(enabled) {
+  const next = !!enabled;
+  state.quickEditorMode = next;
+  if (quickEditorPanel) quickEditorPanel.classList.toggle('visible', next);
+  if (btnQuickEditor) btnQuickEditor.classList.toggle('active', next);
+
+  const lockedButtons = [
+    btnLine, btnRect, btnCircle, btnPolyline, btnArc, btnDimension,
+    btnHatch, btnCenterline, btnMirrorX, btnMirrorY, btnClear, btnInsertImage,
+  ];
+  lockedButtons.forEach(btn => {
+    if (!btn) return;
+    btn.disabled = next;
+  });
+
+  if (next) {
+    if (propsPanel) propsPanel.style.display = 'none';
+    setTool('select');
+    refreshQuickEditorPanel();
+    showStatus('Швидкий редактор увімкнено: просто змініть потрібне число');
+  } else {
+    clearQuickEditorHighlight();
+    if (propsPanel) showPropsPanel(state.entities.find(e => e.id === state.selectedId) || null);
+    showStatus('Повний редактор увімкнено');
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -4075,6 +6353,12 @@ function applyDimensionResizeLegacy(dim, newLen, propagate) {
 // ═══════════════════════════════════════════════
 
 function render() {
+  const vp = getCadViewport();
+  if (vp && typeof vp.setZoom === 'function' && typeof vp.setPan === 'function') {
+    vp.setZoom(state.zoom);
+    vp.setPan(state.panX, state.panY);
+  }
+
   const ez=effectiveZoom(), vw=viewport.clientWidth, vh=viewport.clientHeight;
   const dpr=window.devicePixelRatio||1;
   gridCanvas.width=vw*dpr; gridCanvas.height=vh*dpr;
@@ -4124,23 +6408,125 @@ function updateConnectedEndpoints(entId, epKey, oldX, oldY, newX, newY, visited)
   if (visited.has(entId)) return;
   visited.add(entId);
 
-  const conns = state.connections.filter(
-    c => c.lineId === entId && c.endpoint === epKey
-  );
+  const movedEnt = state.entities.find(e => e.id === entId);
+  const movedMidOld = movedEnt ? {
+    x: (movedEnt.x1 + movedEnt.x2) / 2 - (newX - oldX) / 2,
+    y: (movedEnt.y1 + movedEnt.y2) / 2 - (newY - oldY) / 2,
+  } : { x: oldX, y: oldY };
+  const movedMidNew = movedEnt ? {
+    x: (movedEnt.x1 + movedEnt.x2) / 2,
+    y: (movedEnt.y1 + movedEnt.y2) / 2,
+  } : { x: newX, y: newY };
+
+  const conns = state.connections.filter(c => c.lineId === entId);
 
   conns.forEach(conn => {
     if (visited.has(conn.targetId)) return;
     const target = state.entities.find(e => e.id === conn.targetId);
     if (!target) return;
 
-    if (Math.hypot(target.x1 - oldX, target.y1 - oldY) < 1.0) {
-      target.x1 = newX; target.y1 = newY;
-      if (target.type === 'arc' && target.ctrl) refreshArcGeometry(target);
-      updateConnectedEndpoints(target.id, 'start', oldX, oldY, newX, newY, visited);
-    } else if (Math.hypot(target.x2 - oldX, target.y2 - oldY) < 1.0) {
-      target.x2 = newX; target.y2 = newY;
-      if (target.type === 'arc' && target.ctrl) refreshArcGeometry(target);
-      updateConnectedEndpoints(target.id, 'end', oldX, oldY, newX, newY, visited);
+    const sourceOld = conn.endpoint === 'mid' ? movedMidOld : { x: oldX, y: oldY };
+    const sourceNew = conn.endpoint === 'mid' ? movedMidNew : { x: newX, y: newY };
+    const targetPointKey = conn.targetPoint || conn.endpoint;
+    if (conn.endpoint === 'body') {
+      const jointRef = conn.jointX != null && conn.jointY != null
+        ? { x: conn.jointX, y: conn.jointY }
+        : sourceOld;
+      const joint = closestPointOnEntityBody(movedEnt, jointRef.x, jointRef.y) || jointRef;
+      if (!joint) return;
+
+      if (targetPointKey === 'start') {
+        const oldTx = target.x1;
+        const oldTy = target.y1;
+        if (target.type === 'arc') {
+          if (!setArcEndpointKeepRadius(target, 'start', joint.x, joint.y)) return;
+        } else {
+          target.x1 = joint.x;
+          target.y1 = joint.y;
+        }
+        conn.jointX = joint.x;
+        conn.jointY = joint.y;
+        updateConnectedEndpoints(target.id, 'start', oldTx, oldTy, joint.x, joint.y, visited);
+      } else if (targetPointKey === 'end') {
+        const oldTx = target.x2;
+        const oldTy = target.y2;
+        if (target.type === 'arc') {
+          if (!setArcEndpointKeepRadius(target, 'end', joint.x, joint.y)) return;
+        } else {
+          target.x2 = joint.x;
+          target.y2 = joint.y;
+        }
+        conn.jointX = joint.x;
+        conn.jointY = joint.y;
+        updateConnectedEndpoints(target.id, 'end', oldTx, oldTy, joint.x, joint.y, visited);
+      } else if (targetPointKey === 'mid') {
+        const midX = (target.x1 + target.x2) / 2;
+        const midY = (target.y1 + target.y2) / 2;
+        const mdx = joint.x - midX;
+        const mdy = joint.y - midY;
+        if (target.type === 'arc') {
+          target.x1 += mdx; target.y1 += mdy;
+          target.x2 += mdx; target.y2 += mdy;
+          target.cx += mdx; target.cy += mdy;
+          if (target.ctrl) { target.ctrl.x += mdx; target.ctrl.y += mdy; }
+          refreshArcGeometry(target);
+        } else {
+          target.x1 += mdx; target.y1 += mdy;
+          target.x2 += mdx; target.y2 += mdy;
+        }
+        conn.jointX = joint.x;
+        conn.jointY = joint.y;
+        updateConnectedEndpoints(target.id, 'mid', midX, midY, joint.x, joint.y, visited);
+      }
+      return;
+    }
+    if (targetPointKey === 'body') return;
+    const targetPoint = targetPointKey === 'mid'
+      ? { x: (target.x1 + target.x2) / 2, y: (target.y1 + target.y2) / 2 }
+      : targetPointKey === 'end'
+        ? { x: target.x2, y: target.y2 }
+        : { x: target.x1, y: target.y1 };
+
+    if (Math.hypot(targetPoint.x - sourceOld.x, targetPoint.y - sourceOld.y) >= 1.0) return;
+
+    if (conn.endpoint === 'mid') {
+      const midX = (target.x1 + target.x2) / 2;
+      const midY = (target.y1 + target.y2) / 2;
+      const mdx = sourceNew.x - midX;
+      const mdy = sourceNew.y - midY;
+      if (target.type === 'arc') {
+        target.x1 += mdx; target.y1 += mdy;
+        target.x2 += mdx; target.y2 += mdy;
+        target.cx += mdx; target.cy += mdy;
+        if (target.ctrl) { target.ctrl.x += mdx; target.ctrl.y += mdy; }
+        refreshArcGeometry(target);
+      } else {
+        target.x1 += mdx; target.y1 += mdy;
+        target.x2 += mdx; target.y2 += mdy;
+      }
+      updateConnectedEndpoints(target.id, 'mid', midX, midY, sourceNew.x, sourceNew.y, visited);
+      return;
+    }
+
+    const oldX1 = target.x1;
+    const oldY1 = target.y1;
+    const oldX2 = target.x2;
+    const oldY2 = target.y2;
+
+    if (Math.hypot(target.x1 - targetPoint.x, target.y1 - targetPoint.y) < 1.0) {
+      if (target.type === 'arc') {
+        if (!setArcEndpointKeepRadius(target, 'start', sourceNew.x, sourceNew.y)) return;
+      } else {
+        target.x1 = sourceNew.x; target.y1 = sourceNew.y;
+      }
+      updateConnectedEndpoints(target.id, 'start', sourceOld.x, sourceOld.y, sourceNew.x, sourceNew.y, visited);
+    } else if (Math.hypot(target.x2 - targetPoint.x, target.y2 - targetPoint.y) < 1.0) {
+      if (target.type === 'arc') {
+        if (!setArcEndpointKeepRadius(target, 'end', sourceNew.x, sourceNew.y)) return;
+      } else {
+        target.x2 = sourceNew.x; target.y2 = sourceNew.y;
+      }
+      updateConnectedEndpoints(target.id, 'end', sourceOld.x, sourceOld.y, sourceNew.x, sourceNew.y, visited);
     }
   });
 }
@@ -4254,6 +6640,16 @@ function markerMousedown(e) {
     refreshArcGeometry(ent);
   }
 
+  if (ptIdx === 2 && ent.type === 'arc') {
+    saveSnapshot();
+    state.isDraggingArcCtrl = true;
+    state.dragArcCtrlEntId = ent.id;
+    state.selectedId = ent.id;
+    state.selectedIds = new Set([ent.id]);
+    render();
+    return;
+  }
+
   // Don't remove connections yet — save them temporarily for potential restore
   // Connections will be removed only when user actually starts dragging (mousemove)
   const epKey = ptIdx === 0 ? 'start' : 'end';
@@ -4266,6 +6662,7 @@ function markerMousedown(e) {
   state.isDraggingEndpoint = true;
   state.dragEndpointEntId = ent.id;
   state.dragEndpointIdx = ptIdx;
+  state.dragEndpointRotate = false;
   state.dragEndpointOrigX = ent.type === 'line'
     ? (ptIdx === 0 ? ent.x1 : ent.x2)
     : null;
@@ -4380,6 +6777,10 @@ function trimAllStubsAtPoint(ix, involvedIds) {
         if (freeIsConnected) {
           console.log('[TRIM] ent', ent.id, 'free endpoint connected — skip trim');
           break; // Don't trim connected endpoint
+        }
+        if (getEntitySpanAfterEndpointMove(ent, freeEpKey, ix.x, ix.y) < 0.2) {
+          console.log('[TRIM] ent', ent.id, 'skip trim: would collapse below minimum span');
+          break;
         }
         console.log('[TRIM] ent', ent.id, '*** TRIMMED to', ix.x.toFixed(2), ix.y.toFixed(2));
         if (freeIdx === 0) { ent.x1 = ix.x; ent.y1 = ix.y; }
@@ -5032,6 +7433,8 @@ function renderEntities() {
       if (pathEl) entitiesLayer.appendChild(pathEl);
     }
   }
+
+  renderConnectionSeamCovers();
 }
 
 // Знайти всі лінії з'єднані кінець-в-кінець
@@ -5205,11 +7608,8 @@ function createEntitySVG(ent) {
     line.setAttribute('x1', p1.x.toFixed(2)); line.setAttribute('y1', p1.y.toFixed(2));
     line.setAttribute('x2', p2.x.toFixed(2)); line.setAttribute('y2', p2.y.toFixed(2));
     applyStyle(line);
-    // Connected endpoint → butt, isolated endpoint → square
-    const p1Connected = isEndpointConnected(ent.id, ent.x1, ent.y1);
-    const p2Connected = isEndpointConnected(ent.id, ent.x2, ent.y2);
-    const linecap = (p1Connected && p2Connected) ? 'butt' : 'square';
-    line.setAttribute('stroke-linecap', linecap);
+    // Keep square caps to avoid visible micro-gaps at junctions.
+    line.setAttribute('stroke-linecap', 'square');
     line.setAttribute('stroke-linejoin', 'miter');
     line.setAttribute('stroke-miterlimit', '28');
     return line;
@@ -5319,6 +7719,260 @@ function createEntitySVG(ent) {
   return null;
 }
 
+function getEntityStrokeVisual(ent) {
+  if (!ent) return { color: '#000000', widthPx: 1, dashed: false };
+  const lt = LINE_TYPES[ent.lineType] || LINE_TYPES['solid_thick'];
+  return {
+    color: ent.color || '#000000',
+    widthPx: LINE_S_MM * effectiveZoom() * lt.widthFactor,
+    dashed: lt.dasharray !== 'none',
+  };
+}
+
+function getConnectionPointWorld(conn, lineEnt) {
+  if (!conn || !lineEnt) return null;
+  if (conn.endpoint === 'start') return { x: lineEnt.x1, y: lineEnt.y1 };
+  if (conn.endpoint === 'end') return { x: lineEnt.x2, y: lineEnt.y2 };
+  if (conn.endpoint === 'mid') return { x: (lineEnt.x1 + lineEnt.x2) / 2, y: (lineEnt.y1 + lineEnt.y2) / 2 };
+  if (conn.endpoint === 'body' && conn.jointX != null && conn.jointY != null) {
+    return { x: conn.jointX, y: conn.jointY };
+  }
+  return null;
+}
+
+function addSeamCover(coversGroup, seen, p, color, radiusPx) {
+  if (!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(radiusPx) || radiusPx <= 0) return;
+  const key = `${Math.round(p.x * 1000)}:${Math.round(p.y * 1000)}:${color}:${Math.round(radiusPx * 100)}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const sp = worldToSVG(p.x, p.y);
+  const cover = document.createElementNS(svgNS, 'circle');
+  cover.setAttribute('cx', sp.x.toFixed(2));
+  cover.setAttribute('cy', sp.y.toFixed(2));
+  cover.setAttribute('r', radiusPx.toFixed(2));
+  cover.setAttribute('fill', color);
+  coversGroup.appendChild(cover);
+}
+
+function renderConnectionSeamCovers() {
+  const ENABLE_SEAM_COVERS = true;
+  if (!ENABLE_SEAM_COVERS) return;
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const coversGroup = document.createElementNS(svgNS, 'g');
+  coversGroup.setAttribute('data-role', 'seam-covers');
+  coversGroup.style.pointerEvents = 'none';
+
+  const seen = new Set();
+  state.connections.forEach(conn => {
+    const line = state.entities.find(e => e.id === conn.lineId);
+    const target = state.entities.find(e => e.id === conn.targetId);
+    if (!line || !target) return;
+    if (!['line', 'centerline', 'arc'].includes(line.type)) return;
+    if (!['line', 'centerline', 'arc'].includes(target.type)) return;
+
+    // Paint seam cover only for arc joins (arc-line / arc-arc), where AA seams are most visible.
+    if (line.type !== 'arc' && target.type !== 'arc') return;
+    // Body joints are handled by geometry constraint; endpoint joints only here.
+    if (conn.endpoint === 'body' || conn.targetPoint === 'body') return;
+
+    const p = getConnectionPointWorld(conn, line);
+    if (!p) return;
+
+    const s1 = getEntityStrokeVisual(line);
+    const s2 = getEntityStrokeVisual(target);
+    if (s1.dashed || s2.dashed) return;
+    if (s1.color !== s2.color) return;
+    addSeamCover(coversGroup, seen, p, s1.color, Math.max(s1.widthPx, s2.widthPx) * 0.62 + 0.08);
+  });
+
+  const ents = state.entities.filter(e => ['line', 'centerline', 'arc'].includes(e.type));
+  const endpointTol = Math.max(0.35, 0.6 / effectiveZoom());
+  for (let i = 0; i < ents.length; i++) {
+    for (let j = i + 1; j < ents.length; j++) {
+      const a = ents[i];
+      const b = ents[j];
+      if (a.type !== 'arc' && b.type !== 'arc') continue;
+
+      const sa = getEntityStrokeVisual(a);
+      const sb = getEntityStrokeVisual(b);
+      if (sa.dashed || sb.dashed) continue;
+      if (sa.color !== sb.color) continue;
+
+      const pointsA = [
+        { x: a.x1, y: a.y1 },
+        { x: a.x2, y: a.y2 },
+      ];
+      const pointsB = [
+        { x: b.x1, y: b.y1 },
+        { x: b.x2, y: b.y2 },
+      ];
+
+      pointsA.forEach(pa => {
+        pointsB.forEach(pb => {
+          if (Math.hypot(pa.x - pb.x, pa.y - pb.y) > endpointTol) return;
+          const mid = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 };
+          addSeamCover(coversGroup, seen, mid, sa.color, Math.max(sa.widthPx, sb.widthPx) * 0.68 + 0.10);
+        });
+      });
+    }
+  }
+
+  if (coversGroup.childNodes.length > 0) {
+    entitiesLayer.appendChild(coversGroup);
+  }
+}
+
+function getArcRadiusLabelSide(ent, tipAngleRad) {
+  if (ent && ent.radiusLabelSide) return ent.radiusLabelSide;
+  return Math.cos(tipAngleRad) >= 0 ? 'right' : 'left';
+}
+
+function createRadiusDimensionForArc(ent) {
+  if (!ent || ent.type !== 'arc' || ent.isLine || !isFinite(ent.r) || ent.cx === undefined || ent.cy === undefined) {
+    return null;
+  }
+
+  const tipAngle = ent.ctrl
+    ? Math.atan2(ent.ctrl.y - ent.cy, ent.ctrl.x - ent.cx)
+    : Math.atan2(ent.y2 - ent.cy, ent.x2 - ent.cx);
+  const tipX = ent.cx + ent.r * Math.cos(tipAngle);
+  const tipY = ent.cy + ent.r * Math.sin(tipAngle);
+  const side = getArcRadiusLabelSide(ent, tipAngle);
+  const sign = side === 'right' ? 1 : -1;
+  const leaderX = ent.cx + sign * (ent.r + Math.max(4, ent.r * 0.18));
+  const leaderY = tipY - Math.max(2, ent.r * 0.08);
+
+  return {
+    id: state.nextId++,
+    type: 'dimension',
+    lineType: 'solid_thin',
+    color: '#000000',
+    dimType: 'linear',
+    x1: leaderX,
+    y1: leaderY,
+    x2: tipX,
+    y2: tipY,
+    offset: 0,
+    text: '',
+    dimKind: 'radius',
+    isDiameter: false,
+    isRadius: true,
+    radiusLabelSide: side,
+    anchoredTo: makeAnchors(ent.id, true, true),
+  };
+}
+
+function syncRadiusDimensionToArc(dim, arc) {
+  if (!dim || !arc || arc.type !== 'arc' || arc.isLine || !isFinite(arc.r) || arc.cx === undefined || arc.cy === undefined) {
+    return false;
+  }
+  const side = dim.radiusLabelSide || getArcRadiusLabelSide(arc, 0);
+  const tipAngle = arc.ctrl
+    ? Math.atan2(arc.ctrl.y - arc.cy, arc.ctrl.x - arc.cx)
+    : Math.atan2(arc.y2 - arc.cy, arc.x2 - arc.cx);
+  const sign = side === 'right' ? 1 : -1;
+  const leaderX = arc.cx + sign * (arc.r + Math.max(10, arc.r * 0.45));
+  const leaderY = arc.cy - Math.max(4, arc.r * 0.15);
+  dim.x1 = leaderX;
+  dim.y1 = leaderY;
+  dim.x2 = arc.cx + arc.r * Math.cos(tipAngle);
+  dim.y2 = arc.cy + arc.r * Math.sin(tipAngle);
+  dim.arcRadius = arc.r;
+  dim.radiusLabelSide = side;
+  dim.dimKind = 'radius';
+  dim.isRadius = true;
+  dim.isDiameter = false;
+  return true;
+}
+
+function syncAnchoredDimension(dim, movedEnt, dx = 0, dy = 0) {
+  if (!dim || dim.type !== 'dimension' || !dim.anchoredTo || dim.anchoredTo.length === 0) return false;
+
+  const primaryEnt = state.entities.find(e => e.id === dim.anchoredTo[0].entityId);
+  if (dim.dimKind === 'radius' || dim.isRadius) {
+    if (!primaryEnt || primaryEnt.type !== 'arc') return false;
+    return syncRadiusDimensionToArc(dim, primaryEnt);
+  }
+
+  let changed = false;
+  dim.anchoredTo.forEach(anchor => {
+    const anchoredEnt = state.entities.find(e => e.id === anchor.entityId);
+    if (!anchoredEnt) return;
+    // Always re-sync to anchored entity endpoints directly.
+    // This keeps dimension offset stable and avoids whole-dimension drift.
+    if (anchor.end === 'p1') {
+      if (Math.hypot(dim.x1 - anchoredEnt.x1, dim.y1 - anchoredEnt.y1) > 1e-9) changed = true;
+      dim.x1 = anchoredEnt.x1;
+      dim.y1 = anchoredEnt.y1;
+    }
+    if (anchor.end === 'p2') {
+      if (Math.hypot(dim.x2 - anchoredEnt.x2, dim.y2 - anchoredEnt.y2) > 1e-9) changed = true;
+      dim.x2 = anchoredEnt.x2;
+      dim.y2 = anchoredEnt.y2;
+    }
+  });
+  return changed;
+}
+
+function renderRadiusDimensionEntity(ent, selected) {
+  const arc = ent.anchoredTo && ent.anchoredTo.length > 0
+    ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
+    : null;
+  const color = selected ? '#0066cc' : (ent.color || '#000000');
+  const ez = effectiveZoom();
+  const fontSizePx = 3.2 * ez;
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.dataset.id = ent.id;
+  g.dataset.type = 'dimension';
+
+  const p1s = worldToSVG(ent.x1, ent.y1);
+  const p2s = worldToSVG(ent.x2, ent.y2);
+  const dx = p2s.x - p1s.x;
+  const dy = p2s.y - p1s.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('x1', p1s.x.toFixed(2));
+  line.setAttribute('y1', p1s.y.toFixed(2));
+  line.setAttribute('x2', p2s.x.toFixed(2));
+  line.setAttribute('y2', p2s.y.toFixed(2));
+  line.setAttribute('stroke', color);
+  line.setAttribute('stroke-width', (LINE_S_MM * ez * 0.38).toFixed(2));
+  line.setAttribute('stroke-linecap', 'butt');
+  g.appendChild(line);
+
+  appendArrow(g, p2s.x, p2s.y, ux, uy, ez, color);
+
+  const displayTxt = getDimensionDisplayText(ent);
+  const textW = displayTxt.length * fontSizePx * 0.62;
+  const textH = fontSizePx * 1.2;
+  const side = ent.radiusLabelSide || (arc ? getArcRadiusLabelSide(arc, Math.atan2(ent.y2 - ent.y1, ent.x2 - ent.x1)) : 'right');
+  const textX = p1s.x + (side === 'right' ? textW * 0.5 : -textW * 0.5);
+  const textY = p1s.y - Math.max(8, 4 * ez);
+
+  const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  text.setAttribute('x', textX.toFixed(2));
+  text.setAttribute('y', textY.toFixed(2));
+  text.setAttribute('font-family', 'Segoe UI, Arial, sans-serif');
+  text.setAttribute('font-size', fontSizePx.toFixed(1));
+  text.setAttribute('font-weight', '400');
+  text.setAttribute('text-anchor', 'middle');
+  text.setAttribute('dominant-baseline', 'middle');
+  text.setAttribute('fill', color);
+  text.setAttribute('stroke', '#ffffff');
+  text.setAttribute('stroke-width', Math.max(0.7, ez * 0.32).toFixed(2));
+  text.setAttribute('paint-order', 'stroke fill');
+  text.textContent = displayTxt;
+  g.appendChild(text);
+
+  return g;
+}
+
 // в"Ђв"Ђ Clear text cache of all dimensions anchored to a given entity в"Ђв"Ђ
 function clearDimTextCacheForEntity(entityId) {
   state.entities.forEach(dim => {
@@ -5335,7 +7989,7 @@ function getDimensionDisplayText(ent) {
   // If user set custom text — use it
   if (ent.text && ent.text !== '' && ent.text !== '0') return ent.text;
 
-  if (ent.dimKind === 'radius') {
+  if (ent.dimKind === 'radius' || ent.isRadius) {
     // Find the anchored arc and get current radius
     const arc = ent.anchoredTo && ent.anchoredTo.length > 0
       ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
@@ -5344,7 +7998,7 @@ function getDimensionDisplayText(ent) {
     return 'R' + (Math.round((r || 0) * 10) / 10).toFixed(1);
   }
 
-  if (ent.dimKind === 'diameter') {
+  if (ent.dimKind === 'diameter' || ent.isDiameter) {
     const circle = ent.anchoredTo && ent.anchoredTo.length > 0
       ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
       : null;
@@ -5365,7 +8019,9 @@ function getDimensionDisplayText(ent) {
 
 // в"Ђв"Ђ Render dimension entity (GOST 2.307-68) — supports aligned, linear, radius, diameter в"Ђв"Ђ
 function renderDimensionEntity(ent, selected) {
-  console.log('[RENDER DIM] id:', ent.id, 'len:', Math.hypot(ent.x2-ent.x1, ent.y2-ent.y1).toFixed(2), 'text:', ent.text, 'dimKind:', ent.dimKind);
+  if (ent.dimKind === 'radius' || ent.isRadius) {
+    return renderRadiusDimensionEntity(ent, selected);
+  }
 
   const ez  = effectiveZoom();
   const g   = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -5374,9 +8030,9 @@ function renderDimensionEntity(ent, selected) {
 
   // в"Ђв"Ђ Параметри ліній (ГОСТ 2.307-68) в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
   const S         = LINE_S_MM * ez;
-  const dimSW     = (S * 0.5).toFixed(2);       // розмірна лінія — тонка
-  const extSW     = (S * 0.4).toFixed(2);       // виносна лінія — ще тонша
-  const extOverMM = 1.5;
+  const dimSW     = (S * 0.38).toFixed(2);
+  const extSW     = (S * 0.32).toFixed(2);
+  const extOverMM = 1.2;
   const extOver   = extOverMM * ez;
   const dimColor  = selected ? '#0066cc' : (ent.color || '#000');
   const extColor  = selected ? '#0066cc' : (ent.color || '#000');
@@ -5485,7 +8141,7 @@ function renderDimensionEntity(ent, selected) {
   // в"Ђв"Ђ РОЗМІРНЕ ЧИСЛО Р· фоном в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
   const displayTxt = getDimensionDisplayText(ent);
 
-  const fontSizePx  = 3.5 * ez;
+  const fontSizePx  = 3.2 * ez;
 
   // Приблизна ширина тексту (Arial: ~0.6 * fontSize на символ)
   const charWidth   = fontSizePx * 0.62;
@@ -5497,7 +8153,10 @@ function renderDimensionEntity(ent, selected) {
   const midX = (d1s.x + d2s.x) / 2;
   const midY = (d1s.y + d2s.y) / 2;
 
-  const textOffsetPx = 1.5 * ez;
+  const isRadiusDim = ent.dimKind === 'radius' || ent.isRadius;
+  const textOffsetPx = isRadiusDim
+    ? Math.max(7 * ez, Math.abs((ent.offset || 0) * ez) + 3.5 * ez)
+    : 2.2 * ez;
   const perpSVGX     = -dimUY;
   const perpSVGY     =  dimUX;
   const textX = midX + perpSVGX * textOffsetPx;
@@ -5508,51 +8167,36 @@ function renderDimensionEntity(ent, selected) {
     angleDeg += 180;
   }
 
-  // в"Ђв"Ђ Фоновий прямокутник в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
-  const textBg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-  textBg.setAttribute('x',      (textX - textW/2 - textPadX).toFixed(2));
-  textBg.setAttribute('y',      (textY - textH   - textPadY).toFixed(2));
-  textBg.setAttribute('width',  (textW + textPadX * 2).toFixed(2));
-  textBg.setAttribute('height', (textH + textPadY * 2).toFixed(2));
-  textBg.setAttribute('rx',     '1.5');
-  textBg.setAttribute('fill',   '#ffffff');
-  textBg.setAttribute('fill-opacity', '0.92');
-  textBg.setAttribute('stroke', selected ? '#0066cc' : '#cccccc');
-  textBg.setAttribute('stroke-width', '0.5');
-  textBg.setAttribute('transform',
-    `rotate(${angleDeg.toFixed(2)}, ${textX.toFixed(2)}, ${textY.toFixed(2)})`
-  );
-  g.appendChild(textBg); // ← СПОЧАТКУ фон
-
   // в"Ђв"Ђ Текст розміру в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
   const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
   text.setAttribute('x',           textX.toFixed(2));
   text.setAttribute('y',           textY.toFixed(2));
-  text.setAttribute('font-family', 'Arial, sans-serif');
+  text.setAttribute('font-family', 'Segoe UI, Arial, sans-serif');
   text.setAttribute('font-size',   fontSizePx.toFixed(1));
-  text.setAttribute('font-weight', '500');
+  text.setAttribute('font-weight', '400');
   text.setAttribute('text-anchor', 'middle');
-  text.setAttribute('dominant-baseline', 'auto');
-  // Колір тексту — темно-синій для розмірів
-  text.setAttribute('fill', selected ? '#0044aa' : '#1a1a6e');
+  text.setAttribute('dominant-baseline', 'middle');
+  text.setAttribute('fill', dimColor);
+  text.setAttribute('stroke', '#ffffff');
+  text.setAttribute('stroke-width', Math.max(0.7, ez * 0.32).toFixed(2));
+  text.setAttribute('paint-order', 'stroke fill');
   text.setAttribute('transform',
     `rotate(${angleDeg.toFixed(2)}, ${textX.toFixed(2)}, ${textY.toFixed(2)})`
   );
   text.textContent = displayTxt;
-  g.appendChild(text); // ← ПІСЛЯ фону
+  g.appendChild(text);
 
   // в"Ђв"Ђ Підсвічування при виділенні в"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђв"Ђ
   if (selected) {
     [d1s, d2s].forEach(pt => {
-      const handle = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      handle.setAttribute('x',      (pt.x - 3).toFixed(2));
-      handle.setAttribute('y',      (pt.y - 3).toFixed(2));
-      handle.setAttribute('width',  '6');
-      handle.setAttribute('height', '6');
-      handle.setAttribute('fill',   '#0066cc');
-      handle.setAttribute('fill-opacity', '0.3');
+      const handle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      handle.setAttribute('cx',      pt.x.toFixed(2));
+      handle.setAttribute('cy',      pt.y.toFixed(2));
+      handle.setAttribute('r',       '2.4');
+      handle.setAttribute('fill',   '#ffffff');
+      handle.setAttribute('fill-opacity', '0.55');
       handle.setAttribute('stroke', '#0066cc');
-      handle.setAttribute('stroke-width', '0.8');
+      handle.setAttribute('stroke-width', '0.9');
       g.appendChild(handle);
     });
   }
@@ -5562,8 +8206,8 @@ function renderDimensionEntity(ent, selected) {
 
 // в"Ђв"Ђ GOST arrow: 15В° angle, length 2.5mm в"Ђв"Ђ
 function appendArrow(g, tipX, tipY, dirUX, dirUY, ez, color) {
-  const arrowLenMM = 2.5;
-  const arrowHalfAngleDeg = 15;
+  const arrowLenMM = 2.2;
+  const arrowHalfAngleDeg = 12;
 
   const arrowLen = arrowLenMM * ez;
   const arrowHalfAngle = arrowHalfAngleDeg * Math.PI / 180;
@@ -5705,7 +8349,7 @@ function renderCenterline(ent, selected) {
   return g;
 }
 
-function toolName(t){return{select:'Select',line:'Line',rect:'Rectangle',circle:'Circle',polyline:'Polyline',arc:'Arc',dimension:'Dimension'}[t]||t;}
+function toolName(t){return{select:'Виділення',line:'Лінія',rect:'Прямокутник',circle:'Коло',polyline:'Ламана',arc:'Дуга',dimension:'Розмір'}[t]||t;}
 
 function updateSelectionStatus() {
   if(state.selectedId===null){statusTool.textContent=`Інструмент: ${toolName(state.tool)}`;return;}
@@ -5720,11 +8364,11 @@ function updateSelectionStatus() {
       statusTool.textContent=`Дуга (пряма) | ${formatMM(Math.sqrt(dx*dx+dy*dy))}мм | Delete = видалити`;
     }else{
       let sweep=ent.endAngle-ent.startAngle;if(sweep<0)sweep+=Math.PI*2;
-      statusTool.textContent=`Дуга | R: ${formatMM(ent.r)}мм КуС': ${(sweep*180/Math.PI).toFixed(1)}В° | Delete = видалити`;
+      statusTool.textContent=`Дуга | R: ${formatMM(ent.r)}мм | Кут: ${(sweep*180/Math.PI).toFixed(1)}° | Delete = видалити`;
     }
   }
   else if(ent.type==='dimension'){statusTool.textContent=`Розмір: ${ent._value||''} | Delete = видалити`;}
-  else if(ent.type==='hatch'){statusTool.textContent=`Штриховка | ${ent.points.length} точок, куС':${ent.angle||45}В° | Delete = видалити`;}
+  else if(ent.type==='hatch'){statusTool.textContent=`Штриховка | ${ent.points.length} точок, кут: ${ent.angle||45}° | Delete = видалити`;}
   else if(ent.type==='centerline'){const dx=ent.x2-ent.x1,dy=ent.y2-ent.y1;statusTool.textContent=`Осьова | Довжина: ${formatMM(Math.sqrt(dx*dx+dy*dy))}мм | Delete = видалити`;}
 }
 
@@ -5733,6 +8377,10 @@ function updateSelectionStatus() {
 // ═══════════════════════════════════════════════
 
 function setTool(tool) {
+  if (state.quickEditorMode && tool !== 'select') {
+    showStatus('Швидкий редактор: для малювання натисніть "Виправити" або вимкніть режим');
+    return;
+  }
   if(state.tool==='polyline'&&tool!=='polyline'){if(state.polylinePoints.length>=2)finishPolyline();else{state.polylinePoints=[];previewLayer.innerHTML='';}}
   // Reset hatch state
   if(state.tool==='hatch'&&tool!=='hatch'){
@@ -5750,12 +8398,12 @@ function setTool(tool) {
   const bm={select:btnSelect,line:btnLine,rect:btnRect,circle:btnCircle,polyline:btnPolyline,arc:btnArc,dimension:btnDimension,hatch:btnHatch,centerline:btnCenterline};
   if(bm[tool]) bm[tool].classList.add('active');
   const nm={
-    select:'Select (S)',line:'Line (L)',rect:'Rectangle (R)',circle:'Circle (C)',
-    polyline:'Polyline (P) — dblclick завершити',
-    arc:'Arc (A) — клік початок -> клік кінець -> тягни для вигину',
-    dimension:'Dimension (D) — Point -> Point -> Offset',
-    hatch:'Hatch (H) — клікай точки контуру -> dblclick завершити',
-    centerline:'Centerline (X) — початок -> кінець'
+    select:'Виділення (S)',line:'Лінія (L)',rect:'Прямокутник (R)',circle:'Коло (C)',
+    polyline:'Ламана (P) — подвійний клік для завершення',
+    arc:'Дуга (A) — клік початок -> клік кінець -> тягни для вигину',
+    dimension:'Розмір (D) — точка -> точка -> зсув',
+    hatch:'Штриховка (H) — кликай точки контуру -> подвійний клік для завершення',
+    centerline:'Осьова (X) — початок -> кінець'
   };
   statusTool.textContent='Інструмент: '+(nm[tool]||tool);
   viewport.style.cursor=tool==='select'?'default':'crosshair';
@@ -5771,7 +8419,7 @@ function toggleSnap(){
 
   // Show status in status bar
   showStatus(state.snapEnabled
-    ? 'Магніт увімкнено (endpoint, midpoint, center)'
+    ? 'Магніт увімкнено (кінцева, середня, центр)'
     : 'Магніт вимкнено');
 
   // If disabled — remove marker
@@ -5883,7 +8531,7 @@ async function saveProject(){
     if (r.success) {
       document.title = `ToolCAD — ${r.name}`;
     } else {
-      return;
+      return false;
     }
   } else {
     downloadText(json, 'project.tcad', 'application/json');
@@ -5895,6 +8543,16 @@ async function saveProject(){
     activeProj.snap  = createProjectSnapshot();
     renderProjectTabs();
     showStatus(`Збережено: ${activeProj.name}`);
+  }
+  return true;
+}
+
+async function saveProjectCopy() {
+  const saved = await saveProject();
+  if (!saved) return;
+  const activeProj = state.projects && state.projects[state.activeProjectIdx];
+  if (activeProj) {
+    showStatus(`Копію проекту "${activeProj.name}" збережено`);
   }
 }
 
@@ -5948,7 +8606,7 @@ function parseAndLoad(jsonStr,filename){
     // Rebuild connections from loaded entities
     state.connections = [];
     state.entities.forEach(ent => {
-      if (ent.type === 'line' || ent.type === 'centerline') {
+      if (ent.type === 'line' || ent.type === 'centerline' || ent.type === 'arc') {
         const conns = buildLineConnections(ent.id, ent.x1, ent.y1, ent.x2, ent.y2);
         state.connections.push(...conns);
       }
@@ -5966,6 +8624,7 @@ function parseAndLoad(jsonStr,filename){
       renderProjectTabs();
     }
     document.title = `${projName} — ToolCAD`;
+    if (state.quickEditorMode) refreshQuickEditorPanel();
   }catch(err){alert('Помилка читання файлу: '+err.message);}
 }
 
@@ -6504,8 +9163,8 @@ async function doExportPNG(opts){
       drawExtLine(ent.x1, ent.y1, d1w.x, d1w.y);
       drawExtLine(ent.x2, ent.y2, d2w.x, d2w.y);
 
-      const ARROW_LEN = 2.5;
-      const ARROW_WID = 0.6;
+      const ARROW_LEN = 2.2;
+      const ARROW_WID = 0.47;
 
       function drawArrow(tipX, tipY, dirUx, dirUy) {
         const baseX  = tipX - dirUx * ARROW_LEN;
@@ -6536,19 +9195,20 @@ async function doExportPNG(opts){
 
       const textMidX = (d1w.x + d2w.x) / 2;
       const textMidY = (d1w.y + d2w.y) / 2;
+      const isRadiusDim = ent.dimKind === 'radius' || ent.isRadius;
       const textOffX = isAligned ? nx : (isHoriz ? 0 : (offset >= 0 ? -1 : 1));
       const textOffY = isAligned ? ny : (isHoriz ? (offset >= 0 ? -1 : 1) : 0);
-      const TEXT_OFFSET = 2.0;
+      const TEXT_OFFSET = isRadiusDim ? 8.0 : 2.0;
       let displayText;
       if (ent.text && ent.text !== '' && ent.text !== '0') {
         displayText = ent.text;
-      } else if (ent.dimKind === 'radius') {
+      } else if (ent.dimKind === 'radius' || ent.isRadius) {
         const arc = ent.anchoredTo?.length > 0
           ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
           : null;
         const r = arc ? arc.r : (ent.arcRadius || 0);
         displayText = 'R' + (Math.round(r * 10) / 10).toFixed(1);
-      } else if (ent.dimKind === 'diameter') {
+      } else if (ent.dimKind === 'diameter' || ent.isDiameter) {
         const circ = ent.anchoredTo?.length > 0
           ? state.entities.find(e => e.id === ent.anchoredTo[0].entityId)
           : null;
@@ -6560,18 +9220,17 @@ async function doExportPNG(opts){
         displayText = (Math.round(measuredLen * 10) / 10).toFixed(1);
       }
 
-      const fontSize = 3.5 * scale;
-      ctx.font         = `${fontSize}px Arial, sans-serif`;
+      const fontSize = 3.2 * scale;
+      ctx.font         = `${fontSize}px "Segoe UI", Arial, sans-serif`;
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
 
       const tx = (textMidX + textOffX * TEXT_OFFSET) * scale;
       const ty = (textMidY + textOffY * TEXT_OFFSET) * scale;
 
-      const tw = ctx.measureText(displayText).width;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(tx - tw / 2 - 1, ty - fontSize / 2 - 1, tw + 2, fontSize + 2);
-
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = Math.max(0.6, 0.28 * scale);
+      ctx.strokeText(displayText, tx, ty);
       ctx.fillStyle = ent.color || '#000000';
       ctx.fillText(displayText, tx, ty);
     }
@@ -6725,6 +9384,7 @@ async function doExportPNG(opts){
 viewport.addEventListener('mousemove',(e)=>{
   if (document.querySelector('#dim-edit-dialog, .dim-edit-dialog, .modal-dialog, [data-modal]')) return;
   const rawWorld = screenToWorld(e.clientX, e.clientY);
+  state.pointerWorld = { x: rawWorld.x, y: rawWorld.y };
   let w=getWorkingPoint(e.clientX,e.clientY,e.shiftKey);
   if (state.tool === 'line') {
     const SNAP_TOL = 8 / effectiveZoom();
@@ -6749,6 +9409,12 @@ viewport.addEventListener('mousemove',(e)=>{
   }
   statusCoords.textContent = `X: ${formatMM(w.x)}  Y: ${formatMM(w.y)} мм`;
 
+  if (state.duplicatePlacement?.active) {
+    updateDuplicatePlacement(rawWorld, e.shiftKey);
+    render();
+    return;
+  }
+
   // 1. Arc control-point / endpoint drag (HIGHEST priority)
   if (state.isDraggingEndpoint && (e.buttons & 1)) {
     const ent = state.entities.find(en => en.id === state.dragEndpointEntId);
@@ -6760,30 +9426,28 @@ viewport.addEventListener('mousemove',(e)=>{
     const oldX = idx === 0 ? ent.x1 : ent.x2;
     const oldY = idx === 0 ? ent.y1 : ent.y2;
 
-    // Use w (working point) for drag — it's already snapped
-    if (idx === 0) {
-      const oldMidX = (ent.x1 + ent.x2) / 2;
-      const oldMidY = (ent.y1 + ent.y2) / 2;
-      const ctrlOffX = ent.ctrl ? ent.ctrl.x - oldMidX : 0;
-      const ctrlOffY = ent.ctrl ? ent.ctrl.y - oldMidY : 0;
-      ent.x1 = w.x; ent.y1 = w.y;
-      if (ent.type === 'arc' && ent.ctrl) {
-        const newMidX = (ent.x1 + ent.x2) / 2;
-        const newMidY = (ent.y1 + ent.y2) / 2;
-        ent.ctrl = { x: newMidX + ctrlOffX, y: newMidY + ctrlOffY };
-        refreshArcGeometry(ent);
+    const rotateMode = !!e.ctrlKey && (idx === 0 || idx === 1);
+    let endpointTarget = { x: w.x, y: w.y };
+    if (!rotateMode && e.shiftKey && (idx === 0 || idx === 1)) {
+      const anchor = idx === 0
+        ? { x: ent.x2, y: ent.y2 }
+        : { x: ent.x1, y: ent.y1 };
+      endpointTarget = snapPointToAngle(anchor, endpointTarget);
+    }
+    if (rotateMode) {
+      state.dragEndpointRotate = true;
+      rotateEntityByEndpointDrag(ent, idx, endpointTarget.x, endpointTarget.y);
+    } else if (idx === 0) {
+      if (ent.type === 'arc') {
+        if (!setArcEndpointKeepRadius(ent, 'start', endpointTarget.x, endpointTarget.y)) return;
+      } else {
+        ent.x1 = endpointTarget.x; ent.y1 = endpointTarget.y;
       }
     } else if (idx === 1) {
-      const oldMidX = (ent.x1 + ent.x2) / 2;
-      const oldMidY = (ent.y1 + ent.y2) / 2;
-      const ctrlOffX = ent.ctrl ? ent.ctrl.x - oldMidX : 0;
-      const ctrlOffY = ent.ctrl ? ent.ctrl.y - oldMidY : 0;
-      ent.x2 = w.x; ent.y2 = w.y;
-      if (ent.type === 'arc' && ent.ctrl) {
-        const newMidX = (ent.x1 + ent.x2) / 2;
-        const newMidY = (ent.y1 + ent.y2) / 2;
-        ent.ctrl = { x: newMidX + ctrlOffX, y: newMidY + ctrlOffY };
-        refreshArcGeometry(ent);
+      if (ent.type === 'arc') {
+        if (!setArcEndpointKeepRadius(ent, 'end', endpointTarget.x, endpointTarget.y)) return;
+      } else {
+        ent.x2 = endpointTarget.x; ent.y2 = endpointTarget.y;
       }
     } else if (idx === 2 && ent.type === 'arc') {
       ent.ctrl = { x: w.x, y: w.y };
@@ -6804,44 +9468,60 @@ viewport.addEventListener('mousemove',(e)=>{
       relatedConns.forEach(conn => {
         const target = state.entities.find(e => e.id === conn.targetId);
         if (!target) return;
+        const targetPointKey = conn.targetPoint || conn.endpoint;
+
+        if (targetPointKey === 'body') {
+          return;
+        }
 
         // Find which endpoint of target matches old position
-        if (Math.hypot(target.x1 - oldX, target.y1 - oldY) < 1.0) {
-          target.x1 = newX; target.y1 = newY;
-          if (target.type === 'arc' && target.ctrl) refreshArcGeometry(target);
+        if (targetPointKey === 'start') {
+          if (target.type === 'arc') {
+            if (!setArcEndpointKeepRadius(target, 'start', newX, newY)) return;
+          } else {
+            target.x1 = newX; target.y1 = newY;
+          }
           updateConnectedEndpoints(target.id, 'start', oldX, oldY, newX, newY, new Set([ent.id]));
-        } else if (Math.hypot(target.x2 - oldX, target.y2 - oldY) < 1.0) {
-          target.x2 = newX; target.y2 = newY;
-          if (target.type === 'arc' && target.ctrl) refreshArcGeometry(target);
+        } else if (targetPointKey === 'end') {
+          if (target.type === 'arc') {
+            if (!setArcEndpointKeepRadius(target, 'end', newX, newY)) return;
+          } else {
+            target.x2 = newX; target.y2 = newY;
+          }
           updateConnectedEndpoints(target.id, 'end', oldX, oldY, newX, newY, new Set([ent.id]));
+        } else if (targetPointKey === 'mid') {
+          const midX = (target.x1 + target.x2) / 2;
+          const midY = (target.y1 + target.y2) / 2;
+          const mdx = newX - midX;
+          const mdy = newY - midY;
+          if (target.type === 'arc') {
+            target.x1 += mdx; target.y1 += mdy;
+            target.x2 += mdx; target.y2 += mdy;
+            target.cx += mdx; target.cy += mdy;
+            if (target.ctrl) { target.ctrl.x += mdx; target.ctrl.y += mdy; }
+          } else {
+            target.x1 += mdx; target.y1 += mdy;
+            target.x2 += mdx; target.y2 += mdy;
+          }
+          updateConnectedEndpoints(target.id, 'mid', oldX, oldY, newX, newY, new Set([ent.id]));
         }
       });
+
+      const weldIds = new Set([ent.id]);
+      relatedConns.forEach(conn => {
+        weldIds.add(conn.lineId);
+        weldIds.add(conn.targetId);
+      });
+      if (!state.dragEndpointRotate) {
+        enforceConnectionConstraints(weldIds);
+      }
     }
 
     // Update ALL dimensions anchored to the dragged entity
     // Re-read CURRENT entity coordinates for each anchored point
     state.entities.forEach(dim => {
       if (dim.type !== 'dimension' || !dim.anchoredTo) return;
-
-      let changed = false;
-
-      dim.anchoredTo.forEach(anchor => {
-        // Find the entity this anchor refers to
-        const anchoredEnt = state.entities.find(e => e.id === anchor.entityId);
-        if (!anchoredEnt) return;
-
-        // Update dim point to match current entity endpoint
-        if (anchor.end === 'p1') {
-          dim.x1 = anchoredEnt.x1;
-          dim.y1 = anchoredEnt.y1;
-          changed = true;
-        }
-        if (anchor.end === 'p2') {
-          dim.x2 = anchoredEnt.x2;
-          dim.y2 = anchoredEnt.y2;
-          changed = true;
-        }
-      });
+      const changed = syncAnchoredDimension(dim, ent, 0, 0);
 
       if (changed) dim.text = '';
     });
@@ -6923,24 +9603,54 @@ viewport.addEventListener('mousemove',(e)=>{
 
   // 2. Entity drag
   if(state.isDragging&&state.selectedId!==null && (e.buttons & 1)){
-    const lastW = state.lastDragW || state.dragStartW || { x: w.x, y: w.y };
-    const dx = w.x - lastW.x;
-    const dy = w.y - lastW.y;
+    let dragTarget = { x: w.x, y: w.y };
+    if (e.shiftKey && state.dragStartW) {
+      const totalDx = dragTarget.x - state.dragStartW.x;
+      const totalDy = dragTarget.y - state.dragStartW.y;
+      if (!state.dragAxisLock) {
+        state.dragAxisLock = Math.abs(totalDx) >= Math.abs(totalDy) ? 'x' : 'y';
+      }
+      if (state.dragAxisLock === 'x') {
+        dragTarget = { x: dragTarget.x, y: state.dragStartW.y };
+      } else {
+        dragTarget = { x: state.dragStartW.x, y: dragTarget.y };
+      }
+    } else {
+      state.dragAxisLock = null;
+    }
+    const lastW = state.lastDragW || state.dragStartW || { x: dragTarget.x, y: dragTarget.y };
+    const dx = dragTarget.x - lastW.x;
+    const dy = dragTarget.y - lastW.y;
     const ent = state.entities.find(en=>en.id===state.selectedId);
     if(ent && (dx !== 0 || dy !== 0)){
       if (ent.type === 'image' && ent.locked) {
-        state.lastDragW = { x: w.x, y: w.y };
+        state.lastDragW = { x: dragTarget.x, y: dragTarget.y };
         render();
         return;
       }
-      moveEntity(ent, dx, dy);
-      // Move connected line endpoints along with the entity
-      moveConnectedEndpoints(ent.id, dx, dy);
-      if (ent.type === 'arc' && ent.ctrl) refreshArcGeometry(ent);
-      updateLinkedDimensions(ent, dx, dy);
-      state.lastDragW = { x: w.x, y: w.y };
+      const rigidDrag = state.dragRigidMove || e.ctrlKey;
+      if (rigidDrag) {
+        moveRigidConnectedComponent(ent.id, dx, dy);
+      } else {
+        moveEntity(ent, dx, dy);
+        // Move connected line endpoints along with the entity
+        moveConnectedEndpoints(ent.id, dx, dy);
+        enforceConnectionConstraints(new Set([ent.id]));
+        if (ent.type === 'arc' && ent.ctrl) refreshArcGeometry(ent);
+      }
+      if (!rigidDrag) updateLinkedDimensions(ent, dx, dy);
+      state.lastDragW = { x: dragTarget.x, y: dragTarget.y };
     }
     render(); return;
+  }
+
+  if (state.isDraggingArcCtrl && (e.buttons & 1)) {
+    const ent = state.entities.find(en => en.id === state.dragArcCtrlEntId);
+    if (!ent || ent.type !== 'arc') return;
+    ent.ctrl = { x: w.x, y: w.y };
+    refreshArcGeometry(ent);
+    render();
+    return;
   }
 
   // 3. Pan
@@ -6950,13 +9660,8 @@ viewport.addEventListener('mousemove',(e)=>{
   const svgPos=worldToSVG(w.x,w.y);
   updateRulerCursor(svgPos.x,svgPos.y);
   if(state.tool==='select') {
-    let hoveredId = null;
-    for (let i = state.entities.length - 1; i >= 0; i--) {
-      if (hitTest(state.entities[i], rawWorld.x, rawWorld.y)) {
-        hoveredId = state.entities[i].id;
-        break;
-      }
-    }
+    const hoveredEnt = pickEntityAt(rawWorld.x, rawWorld.y);
+    const hoveredId = hoveredEnt ? hoveredEnt.id : null;
     if (state.hoveredId !== hoveredId) {
       state.hoveredId = hoveredId;
       render();
@@ -7024,6 +9729,10 @@ viewport.addEventListener('mousemove',(e)=>{
       }
     }
 
+    if (e.shiftKey) {
+      previewPt = snapPointToAngle(state.lineStart, previewPt);
+    }
+
     const p2 = worldToSVG(previewPt.x, previewPt.y);
 
     let previewLine = previewLayer.querySelector('.preview-line');
@@ -7076,7 +9785,11 @@ viewport.addEventListener('mousemove',(e)=>{
   }
   // Polyline preview
   if(state.tool==='polyline'&&state.polylinePoints.length>0){
-    const svgPts=state.polylinePoints.map(p=>worldToSVG(p.x,p.y)),curSVG=worldToSVG(w.x,w.y);
+    const svgPts=state.polylinePoints.map(p=>worldToSVG(p.x,p.y));
+    const previewPolyPoint = e.shiftKey
+      ? snapPointToAngle(state.polylinePoints[state.polylinePoints.length - 1], w)
+      : w;
+    const curSVG=worldToSVG(previewPolyPoint.x,previewPolyPoint.y);
     for(let i=0;i<svgPts.length-1;i++) previewLayer.appendChild(makeSVGLine(svgPts[i].x,svgPts[i].y,svgPts[i+1].x,svgPts[i+1].y,'#0066cc','1.5','0'));
     const last=svgPts[svgPts.length-1];
     previewLayer.appendChild(makeSVGLine(last.x,last.y,curSVG.x,curSVG.y,'#0066cc','1.5','6,4'));
@@ -7230,7 +9943,11 @@ viewport.addEventListener('mousemove',(e)=>{
   // Centerline preview
   if(state.tool==='centerline'&&state.lineStart){
     const p1=worldToSVG(state.lineStart.x,state.lineStart.y);
-    previewLayer.appendChild(makeSVGLine(p1.x,p1.y,svgPos.x,svgPos.y,'#aa4400','1.5','6,4'));
+    const centerlinePreviewPoint = e.shiftKey
+      ? snapPointToAngle(state.lineStart, w)
+      : w;
+    const p2=worldToSVG(centerlinePreviewPoint.x,centerlinePreviewPoint.y);
+    previewLayer.appendChild(makeSVGLine(p1.x,p1.y,p2.x,p2.y,'#aa4400','1.5','6,4'));
   }
 });
 
@@ -7238,6 +9955,11 @@ viewport.addEventListener('mousedown',(e)=>{
   // TEMP DIAGNOSTIC LOG — remove after fixing dimension tool
   if(e.button===1){e.preventDefault();state.isPanning=true;state.panStartX=e.clientX;state.panStartY=e.clientY;state.panStartPanX=state.panX;state.panStartPanY=state.panY;viewport.style.cursor='grabbing';return;}
   if(e.button===0){
+    if (state.duplicatePlacement?.active) {
+      e.preventDefault();
+      confirmDuplicatePlacement();
+      return;
+    }
     closeCanvasContextMenu();
     // Use getWorkingPoint so all drawing tools (line/rect/circle/arc/polyline/
     // hatch/centerline/dimension) share consistent object + grid snap behaviour.
@@ -7249,8 +9971,7 @@ viewport.addEventListener('mousedown',(e)=>{
 
       // Shift+click — додати/прибрати Р· множинного виділення
       if(e.shiftKey){
-        let primaryEnt=null;
-        for(let i=state.entities.length-1;i>=0;i--){if(hitTest(state.entities[i],raw2.x,raw2.y)){primaryEnt=state.entities[i];break;}}
+        const primaryEnt = pickEntityAt(raw2.x, raw2.y);
         if(primaryEnt){
           if(!state.selectedIds) state.selectedIds = new Set();
           if(state.selectedIds.has(primaryEnt.id)){
@@ -7263,6 +9984,14 @@ viewport.addEventListener('mousedown',(e)=>{
           } else {
             state.selectedIds.add(primaryEnt.id);
             state.selectedId = primaryEnt.id;
+          }
+          const selectedArcs = [...state.selectedIds]
+            .map(id => state.entities.find(e => e.id === id))
+            .filter(e => e && e.type === 'arc' && !e.isLine);
+          if (selectedArcs.length >= 2 && selectedArcs.length === state.selectedIds.size) {
+            showPropsPanel(null);
+          } else {
+            showPropsPanel(state.entities.find(e => e.id === state.selectedId) || null);
           }
           render();
           showStatus(`Виділено: ${state.selectedIds.size} об'єктів`);
@@ -7286,8 +10015,19 @@ viewport.addEventListener('mousedown',(e)=>{
         }
       }
 
-      let found=null;
-      for(let i=state.entities.length-1;i>=0;i--){if(hitTest(state.entities[i],raw2.x,raw2.y)){found=state.entities[i];break;}}
+      const found = pickEntityAt(raw2.x, raw2.y);
+      if (state.quickEditorMode) {
+        if (found) {
+          state.selectedId = found.id;
+          state.selectedIds = new Set([found.id]);
+        } else {
+          state.selectedId = null;
+          state.selectedIds = new Set();
+        }
+        showPropsPanel(null);
+        render();
+        return;
+      }
       if(found){
         state.selectedId = found.id;
         state.selectedIds = new Set([found.id]);
@@ -7307,6 +10047,8 @@ viewport.addEventListener('mousedown',(e)=>{
         }
         state.isDragging = true;
         state.arcPhase = 0;
+        state.dragRigidMove = !!e.ctrlKey || hasBodyConnection(found.id);
+        state.dragAxisLock = null;
         const rawDrag = screenToWorld(e.clientX, e.clientY);
         state.dragStartW = { x: rawDrag.x, y: rawDrag.y };
         state.lastDragW = { x: rawDrag.x, y: rawDrag.y };
@@ -7317,6 +10059,7 @@ viewport.addEventListener('mousedown',(e)=>{
         state.selectedIds = new Set();
         state.isDragging = false;
         state.arcPhase = 0;
+        state.dragAxisLock = null;
         state.hoveredId = null;
         state.isBoxSelecting = true;
         state.boxSelectStart = screenToWorld(e.clientX, e.clientY);
@@ -7478,6 +10221,10 @@ viewport.addEventListener('mousedown',(e)=>{
           snapType = 'grid';
         }
 
+        if (e.shiftKey) {
+          endPt = snapPointToAngle(state.lineStart, endPt);
+        }
+
         const newLine = {
           id:          state.nextId++,
           type:        'line',
@@ -7516,7 +10263,7 @@ viewport.addEventListener('mousedown',(e)=>{
         previewLayer.innerHTML = '';
         saveSnapshot();
         render();
-        autoAnnotate(newLine);
+        autoAnnotate(newLine, { mergeWithCurrentUndo: true });
         return;
       }
     }
@@ -7526,7 +10273,7 @@ viewport.addEventListener('mousedown',(e)=>{
         const newRect={id:state.nextId++,type:'rect',lineType:'solid_thick',x1:state.lineStart.x,y1:state.lineStart.y,x2:w.x,y2:w.y};
         state.entities.push(newRect);
         state.lineStart=null;previewLayer.innerHTML='';saveSnapshot();render();
-        autoAnnotate(newRect);
+        autoAnnotate(newRect, { mergeWithCurrentUndo: true });
       }
     }
     if(state.tool==='circle'){
@@ -7539,10 +10286,17 @@ viewport.addEventListener('mousedown',(e)=>{
           state.entities.push(newCircle);
         }
         state.lineStart=null;previewLayer.innerHTML='';saveSnapshot();render();
-        if(newCircle) autoAnnotate(newCircle);
+        if(newCircle) autoAnnotate(newCircle, { mergeWithCurrentUndo: true });
       }
     }
-    if(state.tool==='polyline'){state.polylinePoints.push({x:w.x,y:w.y});render();}
+    if(state.tool==='polyline'){
+      let polyPoint = { x: w.x, y: w.y };
+      if (e.shiftKey && state.polylinePoints.length > 0) {
+        polyPoint = snapPointToAngle(state.polylinePoints[state.polylinePoints.length - 1], polyPoint);
+      }
+      state.polylinePoints.push(polyPoint);
+      render();
+    }
 
     // Arc tool — new: click start в†' click end в†' drag control point
     if(state.tool==='arc'){
@@ -7572,18 +10326,20 @@ viewport.addEventListener('mousedown',(e)=>{
         // Calculate arc from 3 points
         const arcData = calcArcFromThreePoints(p1, ctrl, p2);
         if (!arcData || arcData.isLine) {
-          state.entities.push({
+          const lineFromArc = {
             id: state.nextId++,
             type: 'line',
             lineType: 'solid_thick',
             x1: p1.x, y1: p1.y,
             x2: p2.x, y2: p2.y,
-          });
+          };
+          state.entities.push(lineFromArc);
           state.arcPhase = 0;
           state.arcP1 = null;
           previewLayer.innerHTML = '';
           saveSnapshot();
           render();
+          autoAnnotate(lineFromArc, { mergeWithCurrentUndo: true });
           return;
         }
 
@@ -7713,7 +10469,7 @@ viewport.addEventListener('mousedown',(e)=>{
       return;
     }
 
-    // Hatch tool — click to create hatch polygon points, dblclick to finish
+    // Інструмент штриховки — клацайте точки контуру, подвійний клік завершує побудову
     if(state.tool==='hatch'){
       if (!state.hatchPoints) state.hatchPoints = [];
       state.hatchPoints.push({x:w.x, y:w.y});
@@ -7724,10 +10480,13 @@ viewport.addEventListener('mousedown',(e)=>{
     if(state.tool==='centerline'){
       if(!state.lineStart) state.lineStart={x:w.x,y:w.y};
       else{
+        const centerlineEnd = e.shiftKey
+          ? snapPointToAngle(state.lineStart, w)
+          : w;
         state.entities.push({
           id:state.nextId++, type:'centerline', lineType:'dash_dot',
           x1:state.lineStart.x, y1:state.lineStart.y,
-          x2:w.x, y2:w.y
+          x2:centerlineEnd.x, y2:centerlineEnd.y
         });
         state.lineStart=null;
         previewLayer.innerHTML='';
@@ -7743,7 +10502,9 @@ viewport.addEventListener('mouseup',(e)=>{
   if (e.button !== 0) {
     state.isDragging          = false;
     state.isDraggingEndpoint  = false;
+    state.dragEndpointRotate  = false;
     state.isDraggingDimOffset = false;
+    state.dragAxisLock        = null;
     state.isBoxSelecting      = false;
     viewport.style.cursor     = state.tool === 'select' ? 'default' : 'crosshair';
   }
@@ -7779,7 +10540,7 @@ viewport.addEventListener('mouseup',(e)=>{
           if (d2 < bestDist) { bestDist = d2; snapX = other.x2; snapY = other.y2; }
         });
 
-        if (snapX !== null) {
+        if (!state.dragEndpointRotate && snapX !== null) {
           if (endIdx === 0) { endEnt.x1 = snapX; endEnt.y1 = snapY; }
           else              { endEnt.x2 = snapX; endEnt.y2 = snapY; }
           if (endEnt.type === 'arc' && endEnt.ctrl) refreshArcGeometry(endEnt);
@@ -7787,10 +10548,10 @@ viewport.addEventListener('mouseup',(e)=>{
       }
 
       // Rebuild only the affected line connections after endpoint drag
-      if (endEnt) {
+      if (endEnt && !state.dragEndpointRotate) {
         const lineIdsToRebuild = new Set();
 
-        if (endEnt.type === 'line' || endEnt.type === 'centerline') {
+        if (endEnt.type === 'line' || endEnt.type === 'centerline' || endEnt.type === 'arc') {
           lineIdsToRebuild.add(endEnt.id);
         } else if (endIdx === 0 || endIdx === 1) {
           state.dragEndpointPrevConns.forEach(conn => lineIdsToRebuild.add(conn.lineId));
@@ -7798,7 +10559,7 @@ viewport.addEventListener('mouseup',(e)=>{
           const ex = endIdx === 0 ? endEnt.x1 : endEnt.x2;
           const ey = endIdx === 0 ? endEnt.y1 : endEnt.y2;
           state.entities.forEach(ent => {
-            if (ent.type !== 'line' && ent.type !== 'centerline') return;
+            if (ent.type !== 'line' && ent.type !== 'centerline' && ent.type !== 'arc') return;
             if (Math.hypot(ent.x1 - ex, ent.y1 - ey) < 0.5 || Math.hypot(ent.x2 - ex, ent.y2 - ey) < 0.5) {
               lineIdsToRebuild.add(ent.id);
             }
@@ -7806,6 +10567,7 @@ viewport.addEventListener('mouseup',(e)=>{
         }
 
         rebuildLineConnections(lineIdsToRebuild);
+        enforceConnectionConstraints(lineIdsToRebuild);
 
         // After rebuilding connections — trim all stubs at the dragged endpoint position
         if (endIdx === 0 || endIdx === 1) {
@@ -7820,20 +10582,19 @@ viewport.addEventListener('mouseup',(e)=>{
       state.dragEndpointIdx         = null;
       state.dragEndpointOrigX       = null;
       state.dragEndpointOrigY       = null;
+      state.dragEndpointRotate      = false;
       state.dragEndpointDisconnected = false;
       state.dragEndpointPrevConns   = [];
+      state.isDraggingArcCtrl       = false;
+      state.dragArcCtrlEntId        = null;
+      state.dragRigidMove           = false;
+      state.dragAxisLock            = null;
       viewport.style.cursor         = state.tool === 'select' ? 'default' : 'crosshair';
 
       // Final sync: re-read ALL dimension coordinates from their anchored entities
       state.entities.forEach(dim => {
         if (dim.type !== 'dimension' || !dim.anchoredTo) return;
-        let changed = false;
-        dim.anchoredTo.forEach(anchor => {
-          const anchoredEnt = state.entities.find(e => e.id === anchor.entityId);
-          if (!anchoredEnt) return;
-          if (anchor.end === 'p1') { dim.x1 = anchoredEnt.x1; dim.y1 = anchoredEnt.y1; changed = true; }
-          if (anchor.end === 'p2') { dim.x2 = anchoredEnt.x2; dim.y2 = anchoredEnt.y2; changed = true; }
-        });
+        const changed = syncAnchoredDimension(dim, endEnt, 0, 0);
         if (changed) dim.text = '';
       });
 
@@ -7851,6 +10612,11 @@ viewport.addEventListener('mouseup',(e)=>{
         });
         if (state.selectedIds.size > 0) {
           state.selectedId = [...state.selectedIds][0];
+          if (state.selectedIds.size === 1) {
+            showPropsPanel(state.entities.find(e => e.id === state.selectedId) || null);
+          } else {
+            showPropsPanel(null);
+          }
           showStatus(`Вибрано: ${state.selectedIds.size} об'єктів`);
         }
       }
@@ -7880,12 +10646,26 @@ viewport.addEventListener('mouseup',(e)=>{
       console.log('[Arc] Fixed');
       if (finishedArcId !== null) {
         const finishedArc = state.entities.find(e => e.id === finishedArcId);
-        if (finishedArc) autoAnnotate(finishedArc);
+        if (finishedArc) autoAnnotate(finishedArc, { mergeWithCurrentUndo: true });
       }
     }
     // в"Ђв"Ђ Entity drag completion в"Ђв"Ђ
     if(state.isDragging){
-      state.isDragging=false;state.dragStartW=null;state.lastDragW=null;state.dragEntitySnap=null;
+      const movedEnt = state.selectedId !== null
+        ? state.entities.find(e => e.id === state.selectedId)
+        : null;
+      if (movedEnt) {
+        if (!state.dragRigidMove) {
+          const rebuildIds = snapEntityEndpointsToNearbyEndpoints(movedEnt);
+          if (rebuildIds.size > 0) {
+            rebuildLineConnections(rebuildIds);
+            enforceConnectionConstraints(rebuildIds);
+          }
+          updateLinkedDimensions(movedEnt, 0, 0);
+        }
+      }
+      state.isDragging=false;state.dragStartW=null;state.lastDragW=null;state.dragEntitySnap=null;state.dragAxisLock=null;
+      state.dragRigidMove=false;
       viewport.style.cursor=state.tool==='select'?'default':'crosshair';
       saveSnapshot();
     }
@@ -7944,13 +10724,7 @@ viewport.addEventListener('contextmenu', (e) => {
   const rmbWorld = screenToWorld(e.clientX, e.clientY);
 
   const raw = screenToWorld(e.clientX, e.clientY);
-  let hitEnt = null;
-  for (let i = state.entities.length - 1; i >= 0; i--) {
-    if (hitTest(state.entities[i], raw.x, raw.y)) {
-      hitEnt = state.entities[i];
-      break;
-    }
-  }
+  let hitEnt = pickEntityAt(raw.x, raw.y);
 
   // Fallback — find nearest line to RMB click for "connect here" feature
   let nearestLineToRmb = null;
@@ -8019,10 +10793,9 @@ viewport.addEventListener('contextmenu', (e) => {
     });
   }
 
-  // ── Розмітити один об'єкт через RMB ──
-  if (multiSelected.length <= 1 &&
-      (ctxEnt.type === 'line' || ctxEnt.type === 'rect' ||
-       ctxEnt.type === 'circle' || ctxEnt.type === 'arc')) {
+  // ── Розмітити поточний об'єкт через RMB (always available) ──
+  if (ctxEnt.type === 'line' || ctxEnt.type === 'centerline' ||
+      ctxEnt.type === 'rect' || ctxEnt.type === 'circle' || ctxEnt.type === 'arc') {
     items.push({
       label: `📏 Розмітити`,
       action: () => { autoAnnotate(ctxEnt); }
@@ -8088,26 +10861,42 @@ viewport.addEventListener('contextmenu', (e) => {
             const d1 = Math.hypot(selEnt.x1 - clickW.x, selEnt.y1 - clickW.y);
             const d2 = Math.hypot(selEnt.x2 - clickW.x, selEnt.y2 - clickW.y);
 
-            const dx = ctxEnt.x2 - ctxEnt.x1;
-            const dy = ctxEnt.y2 - ctxEnt.y1;
-            const lenSq = dx * dx + dy * dy;
             let connX = clickW.x, connY = clickW.y;
 
-            if (lenSq > 0.001) {
-              const t = Math.max(0, Math.min(1,
-                ((clickW.x - ctxEnt.x1) * dx + (clickW.y - ctxEnt.y1) * dy) / lenSq
-              ));
-              connX = ctxEnt.x1 + t * dx;
-              connY = ctxEnt.y1 + t * dy;
+            if (ctxEnt.type === 'arc' && !ctxEnt.isLine && isFinite(ctxEnt.r)) {
+              const arcPt = closestPointOnArc(ctxEnt, clickW.x, clickW.y);
+              connX = arcPt.x;
+              connY = arcPt.y;
+            } else {
+              const dx = ctxEnt.x2 - ctxEnt.x1;
+              const dy = ctxEnt.y2 - ctxEnt.y1;
+              const lenSq = dx * dx + dy * dy;
+              if (lenSq > 0.001) {
+                const t = Math.max(0, Math.min(1,
+                  ((clickW.x - ctxEnt.x1) * dx + (clickW.y - ctxEnt.y1) * dy) / lenSq
+                ));
+                connX = ctxEnt.x1 + t * dx;
+                connY = ctxEnt.y1 + t * dy;
+              }
             }
 
-            if (d1 <= d2) {
-              selEnt.x1 = connX; selEnt.y1 = connY;
-            } else {
-              selEnt.x2 = connX; selEnt.y2 = connY;
+            const primaryKey = d1 <= d2 ? 'start' : 'end';
+            const secondaryKey = primaryKey === 'start' ? 'end' : 'start';
+            const moved = setEntityEndpointSafe(selEnt, primaryKey, connX, connY, 0.2) ||
+              setEntityEndpointSafe(selEnt, secondaryKey, connX, connY, 0.2);
+
+            if (!moved) {
+              console.log('[CONNECT HERE] skip:', selEnt.id, 'would collapse below minimum span');
+              return;
             }
 
             if (selEnt.type === 'arc' && selEnt.ctrl) refreshArcGeometry(selEnt);
+
+            const movedKey = Math.hypot(selEnt.x1 - connX, selEnt.y1 - connY) < Math.hypot(selEnt.x2 - connX, selEnt.y2 - connY)
+              ? 'start'
+              : 'end';
+            const ctxIsBody = Math.hypot(connX - ctxEnt.x1, connY - ctxEnt.y1) >= 1.0 &&
+                              Math.hypot(connX - ctxEnt.x2, connY - ctxEnt.y2) >= 1.0;
 
             // Trim stubs at the connection point
             trimAllStubsAtPoint(
@@ -8123,6 +10912,17 @@ viewport.addEventListener('contextmenu', (e) => {
               selEnt.id, selEnt.x1, selEnt.y1, selEnt.x2, selEnt.y2
             );
             state.connections.push(...newConnsS);
+
+            if (ctxIsBody) {
+              state.connections.push({
+                lineId: ctxEnt.id,
+                endpoint: 'body',
+                targetId: selEnt.id,
+                targetPoint: movedKey,
+                jointX: connX,
+                jointY: connY,
+              });
+            }
           });
           render();
           showStatus("🔗 З'єднано");
@@ -8163,9 +10963,17 @@ viewport.addEventListener('contextmenu', (e) => {
 
           // Phase 1: collect intersection points and process only selEnt
           const intersectionPoints = [];
+          const targetLineOriginal = {
+            x1: targetLine.x1, y1: targetLine.y1,
+            x2: targetLine.x2, y2: targetLine.y2,
+          };
 
           otherSelected.forEach(selEnt => {
             if (selEnt.type !== 'line' && selEnt.type !== 'centerline') return;
+            const selOriginal = {
+              x1: selEnt.x1, y1: selEnt.y1,
+              x2: selEnt.x2, y2: selEnt.y2,
+            };
 
             const ix = infiniteLinesIntersect(
               selEnt.x1, selEnt.y1, selEnt.x2, selEnt.y2,
@@ -8246,18 +11054,23 @@ viewport.addEventListener('contextmenu', (e) => {
               targetLine.x2.toFixed(2), targetLine.y2.toFixed(2));
 
             if (tParam <= 0.01) {
-              // Перетин на початку або до початку → рухати p1
               if (tConn1) { targetLine.x1 = ix.x; targetLine.y1 = ix.y; }
             } else if (tParam >= 0.99) {
-              // Перетин на кінці або після кінця → рухати p2
               if (tConn2) { targetLine.x2 = ix.x; targetLine.y2 = ix.y; }
-            } else {
-              // Перетин всередині → trim ближчий вільний кінець
-              const d1 = Math.hypot(targetLine.x1 - ix.x, targetLine.y1 - ix.y);
-              const d2 = Math.hypot(targetLine.x2 - ix.x, targetLine.y2 - ix.y);
-              if (d1 <= d2 && tConn1) { targetLine.x1 = ix.x; targetLine.y1 = ix.y; }
-              else if (tConn2)        { targetLine.x2 = ix.x; targetLine.y2 = ix.y; }
             }
+
+            if (Math.hypot(selEnt.x2 - selEnt.x1, selEnt.y2 - selEnt.y1) < 0.2) {
+              selEnt.x1 = selOriginal.x1; selEnt.y1 = selOriginal.y1;
+              selEnt.x2 = selOriginal.x2; selEnt.y2 = selOriginal.y2;
+              console.log('[CONNECT INTERSECTION] restore selEnt:', selEnt.id, 'result below minimum span');
+              return;
+            }
+
+            const selMovedKey = Math.hypot(selEnt.x1 - ix.x, selEnt.y1 - ix.y) < Math.hypot(selEnt.x2 - ix.x, selEnt.y2 - ix.y)
+              ? 'start'
+              : 'end';
+            const targetIsBody = Math.hypot(targetLine.x1 - ix.x, targetLine.y1 - ix.y) >= 1.0 &&
+                                 Math.hypot(targetLine.x2 - ix.x, targetLine.y2 - ix.y) >= 1.0;
 
             // Rebuild connections only for selEnt (don't touch targetLine yet)
             state.connections = state.connections.filter(
@@ -8267,6 +11080,17 @@ viewport.addEventListener('contextmenu', (e) => {
               selEnt.id, selEnt.x1, selEnt.y1, selEnt.x2, selEnt.y2
             );
             state.connections.push(...newConns);
+
+            if (targetIsBody) {
+              state.connections.push({
+                lineId: targetLine.id,
+                endpoint: 'body',
+                targetId: selEnt.id,
+                targetPoint: selMovedKey,
+                jointX: ix.x,
+                jointY: ix.y,
+              });
+            }
 
             trimAllStubsAtPoint(ix, new Set([selEnt.id, targetLine.id]));
           });
@@ -8301,35 +11125,25 @@ viewport.addEventListener('contextmenu', (e) => {
               const tp2Free = !tpConnected(targetLine.x2, targetLine.y2);
 
               if (tIx2 < 0) {
-                // Intersection before start → move p1
                 if (tp1Free && !p1Moved) {
                   targetLine.x1 = ix.x; targetLine.y1 = ix.y;
                   p1Moved = true;
-                } else if (!tp1Free && !tp2Free) {
-                  const d1 = Math.hypot(targetLine.x1 - ix.x, targetLine.y1 - ix.y);
-                  const d2 = Math.hypot(targetLine.x2 - ix.x, targetLine.y2 - ix.y);
-                  if (d1 <= d2 && !p1Moved) { targetLine.x1 = ix.x; targetLine.y1 = ix.y; p1Moved = true; }
-                  else if (!p2Moved)          { targetLine.x2 = ix.x; targetLine.y2 = ix.y; p2Moved = true; }
                 }
               } else if (tIx2 > 1) {
-                // Intersection after end → move p2
                 if (tp2Free && !p2Moved) {
                   targetLine.x2 = ix.x; targetLine.y2 = ix.y;
                   p2Moved = true;
-                } else if (!tp1Free && !tp2Free) {
-                  const d1 = Math.hypot(targetLine.x1 - ix.x, targetLine.y1 - ix.y);
-                  const d2 = Math.hypot(targetLine.x2 - ix.x, targetLine.y2 - ix.y);
-                  if (d2 <= d1 && !p2Moved) { targetLine.x2 = ix.x; targetLine.y2 = ix.y; p2Moved = true; }
-                  else if (!p1Moved)          { targetLine.x1 = ix.x; targetLine.y1 = ix.y; p1Moved = true; }
                 }
               } else {
-                // Intersection inside → trim closer free endpoint
-                const d1 = Math.hypot(targetLine.x1 - ix.x, targetLine.y1 - ix.y);
-                const d2 = Math.hypot(targetLine.x2 - ix.x, targetLine.y2 - ix.y);
-                if (d1 <= d2) { if (tp1Free && !p1Moved) { targetLine.x1 = ix.x; targetLine.y1 = ix.y; p1Moved = true; } }
-                else          { if (tp2Free && !p2Moved) { targetLine.x2 = ix.x; targetLine.y2 = ix.y; p2Moved = true; } }
+                return;
               }
             });
+
+            if (Math.hypot(targetLine.x2 - targetLine.x1, targetLine.y2 - targetLine.y1) < 0.2) {
+              targetLine.x1 = targetLineOriginal.x1; targetLine.y1 = targetLineOriginal.y1;
+              targetLine.x2 = targetLineOriginal.x2; targetLine.y2 = targetLineOriginal.y2;
+              console.log('[CONNECT INTERSECTION] restore targetLine:', targetLine.id, 'result below minimum span');
+            }
 
             // Rebuild connections for targetLine — ONCE after all ix
             state.connections = state.connections.filter(
@@ -8499,16 +11313,20 @@ viewport.addEventListener('dblclick',(e)=>{
 
   // Подвійний клік — редагування розміру (РІ режимі select)
   if (state.tool === 'select') {
+    if (state.quickEditorMode) return;
     const raw = screenToWorld(e.clientX, e.clientY);
-    let hitDim = null;
-    for (let i = state.entities.length - 1; i >= 0; i--) {
-      const ent = state.entities[i];
-      if (ent.type !== 'dimension') continue;
-      if (hitTestDimension(ent, raw.x, raw.y)) {
-        hitDim = ent;
-        break;
-      }
+    let hitDim = findDimensionForEditAt(raw.x, raw.y);
+
+    if (!hitDim && state.selectedId !== null) {
+      const selected = state.entities.find(ent => ent.id === state.selectedId);
+      if (selected && selected.type === 'dimension') hitDim = selected;
     }
+
+    if (!hitDim && state.hoveredId !== null) {
+      const hovered = state.entities.find(ent => ent.id === state.hoveredId);
+      if (hovered && hovered.type === 'dimension') hitDim = hovered;
+    }
+
     if (hitDim) {
       e.preventDefault();
       e.stopPropagation();
@@ -8522,10 +11340,25 @@ viewport.addEventListener('dblclick',(e)=>{
 const MAX_ZOOM = 20;
 const MIN_ZOOM = 0.05;
 viewport.addEventListener('wheel',(e)=>{
+  if (isEventInsideQuickEditor(e.target)) {
+    return;
+  }
   e.preventDefault();
+  const vp = getCadViewport();
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+
+  if (vp && typeof vp.zoomAt === 'function') {
+    vp.zoomAt(e.clientX, e.clientY, factor);
+    state.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, vp.zoom || state.zoom));
+    state.panX = vp.panX;
+    state.panY = vp.panY;
+    render();
+    return;
+  }
+
   const rect=viewport.getBoundingClientRect(),vx=e.clientX-rect.left,vy=e.clientY-rect.top;
   const ez=effectiveZoom(),wx=(vx-state.panX)/ez,wy=(vy-state.panY)/ez;
-  const f=e.deltaY<0?1.1:0.9; state.zoom=Math.min(MAX_ZOOM,Math.max(MIN_ZOOM,state.zoom*f));
+  state.zoom=Math.min(MAX_ZOOM,Math.max(MIN_ZOOM,state.zoom*factor));
   const ne=effectiveZoom(); state.panX=vx-wx*ne; state.panY=vy-wy*ne; render();
 },{passive:false});
 
@@ -8549,6 +11382,29 @@ document.addEventListener('keydown', (e) => {
 
   console.log('[KEY]', e.key, 'code:', code, 'ctrl:', ctrl, 'shift:', shift, 'target:', tag);
 
+  if (state.duplicatePlacement?.active) {
+    if (code === 'Escape') {
+      e.preventDefault();
+      cancelDuplicatePlacement();
+      return;
+    }
+    if (code === 'Enter' || code === 'NumpadEnter') {
+      e.preventDefault();
+      confirmDuplicatePlacement();
+      return;
+    }
+    if (code === 'KeyX') {
+      e.preventDefault();
+      toggleDuplicatePlacementMirror('x');
+      return;
+    }
+    if (code === 'KeyY') {
+      e.preventDefault();
+      toggleDuplicatePlacementMirror('y');
+      return;
+    }
+  }
+
   // ════════════════════════════════════════
   // CTRL / META combinations — FIRST
   // ════════════════════════════════════════
@@ -8567,6 +11423,7 @@ document.addEventListener('keydown', (e) => {
       case 'KeyV': pasteSelected();     return;
       case 'KeyD': duplicateSelected(); return;
       case 'KeyA': selectAll();         return;
+      case 'KeyE': setQuickEditorMode(!state.quickEditorMode); return;
     }
     // Any other Ctrl combo — ignore
     return;
@@ -8591,6 +11448,7 @@ document.addEventListener('keydown', (e) => {
   // ════════════════════════════════════════
   if (code === 'ArrowUp'   || code === 'ArrowDown' ||
       code === 'ArrowLeft' || code === 'ArrowRight') {
+    if (state.quickEditorMode) return;
 
     if (state.selectedId === null) return;
     e.preventDefault();
@@ -8598,6 +11456,10 @@ document.addEventListener('keydown', (e) => {
     const step = shift ? 10 : 1;
     const ent  = state.entities.find(en => en.id === state.selectedId);
     if (!ent) return;
+    if (ent.type === 'dimension') {
+      showStatus('Розмітку стрілками переміщати заборонено');
+      return;
+    }
 
     const dx = code === 'ArrowLeft'  ? -step
              : code === 'ArrowRight' ?  step : 0;
@@ -8615,6 +11477,7 @@ document.addEventListener('keydown', (e) => {
   // Delete / Backspace
   // ════════════════════════════════════════
   if (code === 'Delete' || code === 'Backspace') {
+    if (state.quickEditorMode) return;
     // Видалити всі виділені об'єкти
     const toDelete = new Set();
     if (state.selectedId !== null) toDelete.add(state.selectedId);
@@ -8638,6 +11501,10 @@ document.addEventListener('keydown', (e) => {
   // Escape
   // ════════════════════════════════════════
   if (code === 'Escape') {
+    if (state.quickEditorMode) {
+      setQuickEditorMode(false);
+      return;
+    }
     if (state.tool === 'polyline' &&
         state.polylinePoints.length >= 2) {
       finishPolyline();
@@ -8692,7 +11559,7 @@ document.addEventListener('keydown', (e) => {
       previewLayer.innerHTML = '';
       saveSnapshot();
       render();
-      autoAnnotate(newLine);
+      autoAnnotate(newLine, { mergeWithCurrentUndo: true });
     });
     return;
   }
@@ -8708,6 +11575,7 @@ document.addEventListener('keydown', (e) => {
     case 'KeyA': setTool('arc');       break;
     case 'KeyP': setTool('polyline');  break;
     case 'KeyD': setTool('dimension'); break;
+    case 'KeyQ': setQuickEditorMode(!state.quickEditorMode); break;
     case 'KeyF': zoomToFit();          break;
     case 'KeyM': toggleGrid();         break;
     case 'KeyG': toggleSnap();         break;
@@ -8831,6 +11699,37 @@ btnDimension.addEventListener('click',()=>setTool('dimension'));
 btnHatch.addEventListener('click',()=>setTool('hatch'));
 btnCenterline.addEventListener('click',()=>setTool('centerline'));
 btnStampEdit.addEventListener('click', ()=>openStampEditor());
+if (btnQuickEditor) {
+  btnQuickEditor.addEventListener('click', () => setQuickEditorMode(!state.quickEditorMode));
+}
+
+if (quickEditorClose) {
+  quickEditorClose.addEventListener('click', () => setQuickEditorMode(false));
+}
+if (quickEditorSave) {
+  quickEditorSave.addEventListener('click', async () => {
+    await saveProject();
+    refreshQuickEditorPanel();
+  });
+}
+if (quickEditorSaveCopy) {
+  quickEditorSaveCopy.addEventListener('click', async () => {
+    await saveProjectCopy();
+    refreshQuickEditorPanel();
+  });
+}
+if (quickEditorOpen) {
+  quickEditorOpen.addEventListener('click', async () => {
+    await loadProject();
+    refreshQuickEditorPanel();
+  });
+}
+if (quickEditorFix) {
+  quickEditorFix.addEventListener('click', () => {
+    setQuickEditorMode(false);
+    showStatus('Відкрито повний редактор для ручного виправлення');
+  });
+}
 
 // Вставка зображення
 function handleImageFileSelected(e) {
@@ -9182,7 +12081,11 @@ if (btnHelp) {
           ['Delete', 'Видалити вибране'],
           ['Ctrl+Z', 'Скасувати'],
           ['Ctrl+Y', 'Повторити'],
-          ['Ctrl+D', 'Дублювати'],
+          ['Ctrl+D', 'Дублювати з миттєвим перенесенням'],
+          ['Shift + рух', 'У дублюванні: лише горизонталь/вертикаль'],
+          ['X / Y', 'У дублюванні: віддзеркалити по X / Y'],
+          ['Enter / ЛКМ', 'Підтвердити дублювання'],
+          ['Esc', 'Скасувати дублювання'],
           ['2×клік', 'Редагувати розмір'],
         ],
       },
@@ -9205,7 +12108,7 @@ if (btnHelp) {
         items: [
           ['S', 'Вмикання прив\'язки'],
           ['G', 'Сітка'],
-          ['Shift', 'Примусова прив\'язка до точки'],
+          ['Shift', 'Примусова прив\'язка до точки (під час побудови)'],
         ],
       },
       {
@@ -9485,7 +12388,7 @@ btnExportDXF.addEventListener('click',exportDXF);
 btnExportPNG.addEventListener('click',exportPNG);
 btnClear.addEventListener('click', () => {
   if (state.entities.length === 0) {
-    showStatus('Креслення вже порожнС"');
+    showStatus('Креслення вже порожнє');
     return;
   }
   if (document.getElementById('clear-all-dialog')) return;
@@ -9595,6 +12498,144 @@ if (window.electronAPI?.onMenuAction) {
 // MIRROR / COPY
 // ═══════════════════════════════════════════════
 
+function getSelectionEntities() {
+  const ids = new Set(state.selectedIds || []);
+  if (state.selectedId !== null) ids.add(state.selectedId);
+  if (ids.size === 0) return [];
+  return state.entities.filter(ent => ids.has(ent.id));
+}
+
+function getEntityBounds(ent) {
+  const points = [];
+  if (!ent) return null;
+
+  if (ent.type === 'line' || ent.type === 'rect' || ent.type === 'centerline' || ent.type === 'dimension') {
+    points.push({ x: ent.x1, y: ent.y1 }, { x: ent.x2, y: ent.y2 });
+  } else if (ent.type === 'circle') {
+    const r = Math.max(0, ent.r || 0);
+    points.push({ x: ent.cx - r, y: ent.cy - r }, { x: ent.cx + r, y: ent.cy + r });
+  } else if (ent.type === 'arc') {
+    points.push({ x: ent.x1, y: ent.y1 }, { x: ent.x2, y: ent.y2 });
+    if (ent.ctrl) points.push({ x: ent.ctrl.x, y: ent.ctrl.y });
+    if (isFinite(ent.cx) && isFinite(ent.cy)) points.push({ x: ent.cx, y: ent.cy });
+  } else if (ent.type === 'polyline') {
+    (ent.points || []).forEach(p => points.push({ x: p.x, y: p.y }));
+  } else if (ent.type === 'image') {
+    const w = ent.w || 0;
+    const h = ent.h || 0;
+    points.push({ x: ent.x, y: ent.y }, { x: ent.x + w, y: ent.y + h });
+  }
+
+  if (points.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  points.forEach(p => {
+    if (!isFinite(p.x) || !isFinite(p.y)) return;
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  });
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function getEntitiesBounds(entities) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  entities.forEach(ent => {
+    const b = getEntityBounds(ent);
+    if (!b) return;
+    minX = Math.min(minX, b.minX);
+    minY = Math.min(minY, b.minY);
+    maxX = Math.max(maxX, b.maxX);
+    maxY = Math.max(maxY, b.maxY);
+  });
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) return null;
+  return { minX, minY, maxX, maxY };
+}
+
+function applyDuplicatePlacementTransform() {
+  const dp = state.duplicatePlacement;
+  if (!dp || !dp.active) return;
+
+  dp.baseEntities.forEach(baseEnt => {
+    const idx = state.entities.findIndex(e => e.id === baseEnt.id);
+    if (idx < 0) return;
+    const transformed = deepCopyEntities([baseEnt])[0];
+    if (dp.mirrorX) applyMirrorX(transformed, dp.pivot.x);
+    if (dp.mirrorY) applyMirrorY(transformed, dp.pivot.y);
+    moveEntity(transformed, dp.offsetX, dp.offsetY);
+    state.entities[idx] = transformed;
+  });
+}
+
+function updateDuplicatePlacement(pointer, constrainAxis = false) {
+  const dp = state.duplicatePlacement;
+  if (!dp || !dp.active || !pointer) return;
+  const totalDx = pointer.x - dp.startPointer.x;
+  const totalDy = pointer.y - dp.startPointer.y;
+
+  if (constrainAxis) {
+    if (!dp.axisLock) {
+      if (Math.abs(totalDx) > 1e-9 || Math.abs(totalDy) > 1e-9) {
+        dp.axisLock = Math.abs(totalDx) >= Math.abs(totalDy) ? 'x' : 'y';
+      }
+    }
+    if (dp.axisLock === 'x') {
+      dp.offsetX = totalDx;
+      dp.offsetY = 0;
+    } else if (dp.axisLock === 'y') {
+      dp.offsetX = 0;
+      dp.offsetY = totalDy;
+    } else {
+      dp.offsetX = totalDx;
+      dp.offsetY = totalDy;
+    }
+  } else {
+    dp.axisLock = null;
+    dp.offsetX = totalDx;
+    dp.offsetY = totalDy;
+  }
+  applyDuplicatePlacementTransform();
+}
+
+function toggleDuplicatePlacementMirror(axis) {
+  const dp = state.duplicatePlacement;
+  if (!dp || !dp.active) return;
+  if (axis === 'x') dp.mirrorX = !dp.mirrorX;
+  if (axis === 'y') dp.mirrorY = !dp.mirrorY;
+  applyDuplicatePlacementTransform();
+  render();
+  showStatus(`Дублювання: дзеркало X=${dp.mirrorX ? 'УВІМК' : 'ВИМК'}, Y=${dp.mirrorY ? 'УВІМК' : 'ВИМК'}`);
+}
+
+function cancelDuplicatePlacement() {
+  const dp = state.duplicatePlacement;
+  if (!dp || !dp.active) return false;
+  state.entities = state.entities.filter(ent => !dp.ids.has(ent.id));
+  state.selectedId = dp.prevSelectedId;
+  state.selectedIds = new Set(dp.prevSelectedIds || []);
+  state.duplicatePlacement = null;
+  render();
+  showPropsPanel(state.entities.find(e => e.id === state.selectedId) || null);
+  showStatus('Дублювання скасовано');
+  return true;
+}
+
+function confirmDuplicatePlacement() {
+  const dp = state.duplicatePlacement;
+  if (!dp || !dp.active) return false;
+  state.duplicatePlacement = null;
+  saveSnapshot();
+  render();
+  if (state.selectedIds && state.selectedIds.size === 1) {
+    showPropsPanel(state.entities.find(e => e.id === state.selectedId) || null);
+  } else {
+    showPropsPanel(null);
+  }
+  showStatus(`Дублікат створено (${dp.ids.size})`);
+  return true;
+}
+
 function copySelected() {
   if (state.selectedId === null) return;
   const ent = state.entities.find(e => e.id === state.selectedId);
@@ -9602,22 +12643,22 @@ function copySelected() {
 
   state.clipboard = deepCopyEntities([ent])[0];
 
-  // Show confirmation in status bar
+  // Показуємо підтвердження в рядку стану
   const oldStatus = statusTool.textContent;
   statusTool.textContent = 'Скопійовано — Ctrl+V для вставки';
   setTimeout(() => { statusTool.textContent = oldStatus; }, 2000);
 
-  console.log('[Copy]', ent.type);
+  console.log('[Копіювання]', ent.type);
 }
 
-// в"Ђв"Ђ Paste в"Ђв"Ђ
+// Вставка
 function pasteSelected() {
   if (!state.clipboard) return;
 
   const copy    = deepCopyEntities([state.clipboard])[0];
   copy.id       = state.nextId++;
 
-  // Offset by 10mm so it's visible
+  // Зсуваємо на 10 мм, щоб копія була видима
   moveEntity(copy, 10, 10);
 
   state.entities.push(copy);
@@ -9626,26 +12667,54 @@ function pasteSelected() {
   saveSnapshot();
   render();
   showPropsPanel(copy);
-  console.log('[Paste]', copy.type, 'id:', copy.id);
+  console.log('[Вставка]', copy.type, 'id:', copy.id);
 }
 
-// в"Ђв"Ђ Duplicate (Ctrl+D) = Copy + Paste immediately в"Ђв"Ђ
+// Дублювання (Ctrl+D) = копіює та одразу вставляє
 function duplicateSelected() {
-  if (state.selectedId === null) return;
-  const ent = state.entities.find(e => e.id === state.selectedId);
-  if (!ent) return;
+  if (state.duplicatePlacement?.active) {
+    confirmDuplicatePlacement();
+    return;
+  }
 
-  const copy = deepCopyEntities([ent])[0];
-  copy.id    = state.nextId++;
-  moveEntity(copy, 10, 10);
+  const selected = getSelectionEntities();
+  if (selected.length === 0) return;
 
-  state.entities.push(copy);
-  state.selectedId = copy.id;
+  const prevSelectedId = state.selectedId;
+  const prevSelectedIds = [...(state.selectedIds || new Set())];
+  const copies = deepCopyEntities(selected).map(ent => ({ ...ent, id: state.nextId++ }));
+  state.entities.push(...copies);
 
-  saveSnapshot();
+  const newIds = copies.map(e => e.id);
+  state.selectedIds = new Set(newIds);
+  state.selectedId = newIds.length > 0 ? newIds[newIds.length - 1] : null;
+
+  const bounds = getEntitiesBounds(copies);
+  const pivot = bounds
+    ? { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 }
+    : { x: 0, y: 0 };
+  const startPointer = state.pointerWorld
+    ? { x: state.pointerWorld.x, y: state.pointerWorld.y }
+    : { x: pivot.x, y: pivot.y };
+
+  state.duplicatePlacement = {
+    active: true,
+    ids: new Set(newIds),
+    baseEntities: deepCopyEntities(copies),
+    prevSelectedId,
+    prevSelectedIds,
+    pivot,
+    startPointer,
+    offsetX: 0,
+    offsetY: 0,
+    axisLock: null,
+    mirrorX: false,
+    mirrorY: false,
+  };
+
   render();
-  showPropsPanel(copy);
-  console.log('[Duplicate]', copy.type);
+  showPropsPanel(null);
+  showStatus('Дублювання: рухайте мишу, Shift — тільки H/V, X/Y — дзеркало, Enter/клік — підтвердити, Esc — скасувати');
 }
 
 // в"Ђв"Ђ Select All в"Ђв"Ђ
@@ -9686,7 +12755,7 @@ function mirrorGlobal(axis) {
 }
 
 function applyMirrorX(ent, axisX) {
-  if (ent.type === 'line' || ent.type === 'rect') {
+  if (ent.type === 'line' || ent.type === 'rect' || ent.type === 'centerline') {
     ent.x1 = 2*axisX - ent.x1;
     ent.x2 = 2*axisX - ent.x2;
   } else if (ent.type === 'circle') {
@@ -9712,7 +12781,7 @@ function applyMirrorX(ent, axisX) {
 }
 
 function applyMirrorY(ent, axisY) {
-  if (ent.type === 'line' || ent.type === 'rect') {
+  if (ent.type === 'line' || ent.type === 'rect' || ent.type === 'centerline') {
     ent.y1 = 2*axisY - ent.y1;
     ent.y2 = 2*axisY - ent.y2;
   } else if (ent.type === 'circle') {
@@ -9782,3 +12851,5 @@ if (state.projects && state.projects[state.activeProjectIdx]) {
   state.projects[state.activeProjectIdx].dirty = false;
   renderProjectTabs();
 }
+
+
